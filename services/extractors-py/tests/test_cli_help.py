@@ -92,7 +92,7 @@ def test_version_flag_prints_version() -> None:
     )
 
 
-@pytest.mark.parametrize("subcommand", ["extract", "ocr", "scan"])
+@pytest.mark.parametrize("subcommand", ["ocr", "scan"])
 def test_stub_subcommand_returns_not_implemented_json(
     subcommand: str, tmp_path: Path
 ) -> None:

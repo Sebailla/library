@@ -20,6 +20,7 @@ import sys
 from typing import Any
 
 from . import __version__
+from ._bootstrap import bootstrap as _bootstrap_mvp
 
 SCHEMA_VERSION = 1
 
@@ -60,15 +61,54 @@ def _emit_error(code: str, message: str) -> None:
 def _stub_handler(subcommand: str, _args: argparse.Namespace) -> int:
     """Placeholder handler for every not-yet-implemented subcommand.
 
-    The real implementations land in Phase 1 tasks 1.4 (extract), 1.5
-    (ocr), and the scanner subcommand (Phase 2 in the spec). For now we
-    emit a stable error envelope and exit with ``EXIT_INVALID_ARGS``
-    so the contract is testable.
+    The real implementations land in Phase 1 tasks 1.5 (ocr) and the
+    scanner subcommand (Phase 2 in the spec). For now we emit a stable
+    error envelope and exit with ``EXIT_INVALID_ARGS`` so the contract
+    is testable.
     """
     _emit_error(
         "NOT_IMPLEMENTED",
         f"{subcommand} subcommand is not yet implemented",
     )
+    return EXIT_INVALID_ARGS
+
+
+# Exit-code mapping for extract subcommand errors. Keeps the mapping
+# localised so the spec's exit-code table can be regenerated easily.
+_EXTRACT_ERROR_EXIT_CODE: dict[str, int] = {
+    "FILE_UNREADABLE": EXIT_FILE_UNREADABLE,
+    "UNKNOWN_FORMAT": EXIT_UNKNOWN_FORMAT,
+    "BACKEND_UNAVAILABLE": EXIT_BACKEND_UNAVAILABLE,
+    "NOT_IMPLEMENTED": EXIT_INVALID_ARGS,
+}
+
+
+def _handle_extract(args: argparse.Namespace) -> int:
+    """Dispatch the ``extract`` subcommand to the right per-format wrapper.
+
+    The dispatcher reads the file extension, picks a wrapper, and
+    delegates. The wrapper returns either a JSON-ready dict on success
+    or a dict containing an ``error`` envelope on failure — we
+    translate the envelope's ``code`` field into the spec's exit-code
+    table.
+    """
+    from pathlib import Path  # local import keeps top-of-file cost minimal
+
+    from .extractors.dispatch import dispatch_extract
+
+    raw = Path(args.path)
+    payload = dispatch_extract(raw)
+
+    _emit(payload)
+
+    err = payload.get("error") if isinstance(payload, dict) else None
+    if err is None:
+        return EXIT_OK
+
+    code = err.get("code") if isinstance(err, dict) else None
+    if code in _EXTRACT_ERROR_EXIT_CODE:
+        return _EXTRACT_ERROR_EXIT_CODE[code]
+    # Unknown error code — treat as invalid usage but emit the envelope.
     return EXIT_INVALID_ARGS
 
 
@@ -96,11 +136,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     extract = subparsers.add_parser(
         "extract",
-        help="Run a metadata extractor on a file (NOT IMPLEMENTED YET)",
+        help="Run a metadata extractor on a file",
         description="Run a metadata extractor on a file.",
     )
     extract.add_argument("path", help="Absolute path to the input file")
-    extract.set_defaults(handler=lambda args: _stub_handler("extract", args))
+    extract.set_defaults(handler=_handle_extract)
 
     ocr = subparsers.add_parser(
         "ocr",
@@ -130,6 +170,8 @@ def main(argv: list[str] | None = None) -> int:
     """Entry point used by both ``python -m alejandria_sidecar`` and the
     ``alejandria-sidecar`` console script declared in ``pyproject.toml``.
     """
+    # Bootstrap must run before any wrapper touches ``alejandria.*``.
+    _bootstrap_mvp()
     parser = build_parser()
     args = parser.parse_args(argv)
 
