@@ -10,5 +10,9 @@ module.exports = {
     '^@app/(.*)$': '<rootDir>/src/$1',
   },
   testEnvironment: 'node',
+  // Run suites serially: the migration runner tests reset the public
+  // schema, which would race against any other suite that talks to the
+  // same database.
+  maxWorkers: 1,
   forceExit: true,
 };
