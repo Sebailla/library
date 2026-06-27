@@ -113,6 +113,35 @@ def _handle_extract(args: argparse.Namespace) -> int:
     return EXIT_INVALID_ARGS
 
 
+# Exit-code mapping for OCR subcommand errors.
+_OCR_ERROR_EXIT_CODE: dict[str, int] = {
+    "FILE_UNREADABLE": EXIT_FILE_UNREADABLE,
+    "BACKEND_UNAVAILABLE": EXIT_BACKEND_UNAVAILABLE,
+    "OCR_FAILED": EXIT_BACKEND_UNAVAILABLE,
+}
+
+
+def _handle_ocr(args: argparse.Namespace) -> int:
+    """Dispatch the ``ocr`` subcommand to the OCR wrapper."""
+    from pathlib import Path  # local import keeps top-of-file cost minimal
+
+    from .extractors.ocr import extract_ocr
+
+    raw = Path(args.path)
+    payload = extract_ocr(raw, backend=getattr(args, "backend", None), lang=args.lang)
+
+    _emit(payload)
+
+    err = payload.get("error") if isinstance(payload, dict) else None
+    if err is None:
+        return EXIT_OK
+
+    code = err.get("code") if isinstance(err, dict) else None
+    if code in _OCR_ERROR_EXIT_CODE:
+        return _OCR_ERROR_EXIT_CODE[code]
+    return EXIT_INVALID_ARGS
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Construct the top-level argument parser.
 
@@ -145,11 +174,22 @@ def build_parser() -> argparse.ArgumentParser:
 
     ocr = subparsers.add_parser(
         "ocr",
-        help="Run OCR on an image or PDF (NOT IMPLEMENTED YET)",
+        help="Run OCR on an image or PDF",
         description="Run OCR on an image or PDF.",
     )
     ocr.add_argument("path", help="Absolute path to the input file")
-    ocr.set_defaults(handler=lambda args: _stub_handler("ocr", args))
+    ocr.add_argument(
+        "--backend",
+        choices=("vision", "unlimited", "tesseract"),
+        default=None,
+        help="Preferred OCR backend; falls back to the default order",
+    )
+    ocr.add_argument(
+        "--lang",
+        default="es",
+        help="BCP-47 / ISO-639 language code (default: es)",
+    )
+    ocr.set_defaults(handler=_handle_ocr)
 
     scan = subparsers.add_parser(
         "scan",
