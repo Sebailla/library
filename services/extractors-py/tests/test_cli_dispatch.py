@@ -112,6 +112,86 @@ def test_dispatch_registry_maps_mp3_to_extract_audio() -> None:
     )
 
 
+def test_dispatch_registry_maps_mp4_to_extract_video() -> None:
+    """``.mp4`` must route to ``extractors.video.extract_video``."""
+    from alejandria_sidecar.extractors import video as video_module
+    from alejandria_sidecar.extractors.dispatch import dispatch_extract
+
+    dispatch_extract(Path("does-not-matter.mp4"))
+
+    import alejandria_sidecar.extractors.dispatch as dispatch_module
+
+    mapping = dispatch_module._EXTRACTORS
+    assert ".mp4" in mapping, "dispatcher registry is missing .mp4"
+    assert mapping[".mp4"] is video_module.extract_video, (
+        f".mp4 must route to extractors.video.extract_video; got {mapping['.mp4']}"
+    )
+
+
+def test_dispatch_registry_maps_avi_to_extract_video() -> None:
+    """``.avi`` must route to ``extractors.video.extract_video`` (same wrapper as .mp4)."""
+    from alejandria_sidecar.extractors import video as video_module
+    from alejandria_sidecar.extractors.dispatch import dispatch_extract
+
+    dispatch_extract(Path("does-not-matter.avi"))
+
+    import alejandria_sidecar.extractors.dispatch as dispatch_module
+
+    mapping = dispatch_module._EXTRACTORS
+    assert ".avi" in mapping, "dispatcher registry is missing .avi"
+    assert mapping[".avi"] is video_module.extract_video, (
+        f".avi must route to extractors.video.extract_video; got {mapping['.avi']}"
+    )
+
+
+def test_dispatch_registry_maps_chm_to_extract_chm() -> None:
+    """``.chm`` must route to ``extractors.chm.extract_chm``."""
+    from alejandria_sidecar.extractors import chm as chm_module
+    from alejandria_sidecar.extractors.dispatch import dispatch_extract
+
+    dispatch_extract(Path("does-not-matter.chm"))
+
+    import alejandria_sidecar.extractors.dispatch as dispatch_module
+
+    mapping = dispatch_module._EXTRACTORS
+    assert ".chm" in mapping, "dispatcher registry is missing .chm"
+    assert mapping[".chm"] is chm_module.extract_chm, (
+        f".chm must route to extractors.chm.extract_chm; got {mapping['.chm']}"
+    )
+
+
+def test_dispatch_registry_maps_djvu_to_extract_djvu() -> None:
+    """``.djvu`` must route to ``extractors.djvu.extract_djvu``."""
+    from alejandria_sidecar.extractors import djvu as djvu_module
+    from alejandria_sidecar.extractors.dispatch import dispatch_extract
+
+    dispatch_extract(Path("does-not-matter.djvu"))
+
+    import alejandria_sidecar.extractors.dispatch as dispatch_module
+
+    mapping = dispatch_module._EXTRACTORS
+    assert ".djvu" in mapping, "dispatcher registry is missing .djvu"
+    assert mapping[".djvu"] is djvu_module.extract_djvu, (
+        f".djvu must route to extractors.djvu.extract_djvu; got {mapping['.djvu']}"
+    )
+
+
+def test_dispatch_registry_maps_djv_alias_to_extract_djvu() -> None:
+    """``.djv`` must route to the same ``extractors.djvu.extract_djvu`` wrapper."""
+    from alejandria_sidecar.extractors import djvu as djvu_module
+    from alejandria_sidecar.extractors.dispatch import dispatch_extract
+
+    dispatch_extract(Path("does-not-matter.djv"))
+
+    import alejandria_sidecar.extractors.dispatch as dispatch_module
+
+    mapping = dispatch_module._EXTRACTORS
+    assert ".djv" in mapping, "dispatcher registry is missing .djv alias"
+    assert mapping[".djv"] is djvu_module.extract_djvu, (
+        f".djv must route to extractors.djvu.extract_djvu; got {mapping['.djv']}"
+    )
+
+
 def test_cli_extract_routes_epub_through_dispatcher(minimal_epub: Path) -> None:
     """End-to-end: a real EPUB fed to the CLI must surface the EPUB wrapper output."""
     from .conftest import run_cli
@@ -190,6 +270,51 @@ def test_cli_extract_routes_wav_through_dispatcher(minimal_audio: Path) -> None:
     payload = json.loads(result.stdout)
     assert payload["format"] == "audio"
     assert payload["extractor_name"] == "audio"
+
+
+def test_cli_extract_routes_mp4_through_dispatcher(minimal_video: Path) -> None:
+    """End-to-end: a real MP4 fed to the CLI must surface the video wrapper output."""
+    from .conftest import run_cli
+
+    result = run_cli("extract", str(minimal_video))
+
+    assert result.returncode == 0, (
+        f"extract must exit 0 for a valid MP4; got {result.returncode}\n"
+        f"stderr:\n{result.stderr}"
+    )
+    payload = json.loads(result.stdout)
+    assert payload["format"] == "video"
+    assert payload["extractor_name"] == "video"
+
+
+def test_cli_extract_routes_chm_through_dispatcher(minimal_chm: Path) -> None:
+    """End-to-end: a real CHM fed to the CLI must surface the CHM wrapper output."""
+    from .conftest import run_cli
+
+    result = run_cli("extract", str(minimal_chm))
+
+    assert result.returncode == 0, (
+        f"extract must exit 0 for a valid CHM; got {result.returncode}\n"
+        f"stderr:\n{result.stderr}"
+    )
+    payload = json.loads(result.stdout)
+    assert payload["format"] == "chm"
+    assert payload["extractor_name"] == "chm"
+
+
+def test_cli_extract_routes_djvu_through_dispatcher(minimal_djvu: Path) -> None:
+    """End-to-end: a real DjVu fed to the CLI must surface the DjVu wrapper output."""
+    from .conftest import run_cli
+
+    result = run_cli("extract", str(minimal_djvu))
+
+    assert result.returncode == 0, (
+        f"extract must exit 0 for a valid DjVu; got {result.returncode}\n"
+        f"stderr:\n{result.stderr}"
+    )
+    payload = json.loads(result.stdout)
+    assert payload["format"] == "djvu"
+    assert payload["extractor_name"] == "djvu"
 
 
 def test_cli_extract_unknown_format_returns_unknown_envelope(tmp_path: Path) -> None:
