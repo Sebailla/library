@@ -52,5 +52,10 @@ import { BooksService } from './books.service';
       useFactory: (pool: Pool) => new PgSagasRepository(pool),
     },
   ],
+  // ``BOOKS_REPOSITORY`` is re-exported so sibling modules
+  // (currently ``AuthorsModule``) can resolve it without re-wiring
+  // the pg pool. ``CATEGORIES_REPOSITORY`` and ``SAGAS_REPOSITORY``
+  // stay internal — only ``BooksService`` uses them today.
+  exports: [BOOKS_REPOSITORY],
 })
 export class BooksModule {}
