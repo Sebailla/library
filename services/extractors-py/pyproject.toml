@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "alejandria-sidecar"
+version = "0.1.0"
+description = "Python CLI shim exposing the alejandria extractors and OCR backends to NestJS / Next.js / Electron."
+# Pinned to <3.14 because pyobjc-framework-Vision (used by the OCR backends)
+# does not ship wheels for Python 3.14+. See
+# openspec/changes/alejandria-v2/specs/python-sidecar-cli/spec.md §
+# "Sidecar pins Python 3.11–3.13".
+requires-python = ">=3.11,<3.14"
+authors = [{ name = "Sebastián Bailla" }]
+license = { text = "Proprietary" }
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7",
+]
+
+[project.scripts]
+alejandria-sidecar = "alejandria_sidecar.cli:main"
+
+[tool.setuptools]
+packages = ["alejandria_sidecar"]
+
+[tool.setuptools.package-data]
+alejandria_sidecar = ["py.typed"]

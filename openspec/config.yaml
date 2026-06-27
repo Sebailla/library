@@ -1,0 +1,70 @@
+schema: spec-driven
+
+project: alejandria
+
+context: |
+  Local-first personal library catalog and reader for macOS + iPad.
+  Current backend: Python 3.11+, FastAPI + uvicorn, pyobjc (Vision/Cocoa) for OCR,
+  py2app packaging, platformdirs, mutagen/Pillow/pymupdf/python-docx/olefile.
+  Current web: React 18 + Vite 5 + TS 5.6 (strict), TanStack Query, Zustand, React Router.
+  Planned refactor (per Documents-es/refactor/): Next.js 16 + React 19 (RSC + Cache
+  Components) on the frontend, NestJS + Postgres + pgroonga on the NAS backend,
+  Python kept as sidecar worker for OCR + extractors. Tauri/Electron shell.
+  Persistence: hybrid (Engram + OpenSpec).
+  Strict TDD: enabled.
+
+rules:
+  proposal:
+    - Include rollback plan for risky changes
+    - Reference Documents-es/refactor/ decisions when proposing stack migration
+  specs:
+    - Use Given/When/Then for scenarios
+    - Use RFC 2119 keywords (MUST, SHALL, SHOULD, MAY)
+  design:
+    - Include sequence diagrams for complex flows
+    - Document architecture decisions with rationale
+    - Preserve Python sidecar boundary when designing any NestJS-bound work
+  tasks:
+    - Group by phase, use hierarchical numbering
+    - Keep tasks completable in one session
+    - Split large phases (>400 LOC) into chained PRs
+  apply:
+    tdd: true
+    test_command: "pytest -q"
+    web_test_command: "npm --prefix web test"
+    web_lint_command: "npm --prefix web run lint"
+    web_typecheck_command: "npm --prefix web run typecheck"
+    python_lint_command: "ruff check ."
+    python_typecheck_command: "mypy alejandria"
+  verify:
+    test_command: "pytest -q"
+    web_test_command: "npm --prefix web test"
+    web_build_command: "npm --prefix web run build"
+    coverage_threshold: 0
+  archive:
+    - Warn before merging destructive deltas
+
+testing:
+  strict_tdd: true
+  detected_at: "2026-06-26"
+  backend:
+    runner: pytest
+    framework: pytest + pytest-asyncio
+    layers:
+      unit: tests/unit/
+      integration: tests/integration/
+    coverage: not_configured
+    command: pytest -q
+  frontend:
+    runner: vitest
+    framework: vitest + @testing-library/react + jsdom
+    layers:
+      unit: web/src/__tests__/
+    coverage: not_configured
+    command: npm --prefix web test
+  quality:
+    linter_python: ruff
+    linter_web: eslint
+    typechecker_python: mypy
+    typechecker_web: tsc
+    formatter_web: not_configured
