@@ -47,3 +47,7 @@ yarn-error.log*
 
 # OS
 Thumbs.db
+
+# Stray zero-byte files accidentally created by tab-completion / shell
+# navigation (typically named '-' at the root of a services/ folder).
+/-

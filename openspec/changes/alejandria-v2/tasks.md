@@ -24,8 +24,8 @@ Chain strategy: stacked-to-main
 
 - [x] 1.1 RED test `services/extractors-py/tests/test_cli.py` for JSON envelope + exit codes 0/2/3/4/5 with PDF/EPUB fixtures.
 - [x] 1.2 GREEN implement `alejandria_sidecar/cli.py` argparse dispatcher with `schema_version=1` envelope.
-- [ ] 1.3 GREEN add re-export shims in `alejandria_sidecar/extractors/{pdf,epub,docx,chm,djvu,cbz,audio,video,image}.py`.
-- [ ] 1.4 GREEN add `alejandria_sidecar/ocr.py` wrapping `alejandria/ocr/` with `--backend vision|unlimited|tesseract`.
+- [x] 1.3 GREEN add re-export shims in `alejandria_sidecar/extractors/{pdf,epub,docx,chm,djvu,cbz,audio,video,image}.py`.
+- [x] 1.4 GREEN add `alejandria_sidecar/ocr.py` wrapping `alejandria/ocr/` with `--backend vision|unlimited|tesseract`.
 - [x] 1.5 REFACTOR pin `requires-python = ">=3.11,<3.14"` in `pyproject.toml` (pyobjc-Vision cap).
 - [x] 1.6 DOCS write `services/extractors-py/README.md` with `alejandria extract <path>` usage + exit-code table.
 
