@@ -179,7 +179,16 @@ describe('GET /api/search (pgroonga-backed full-text search)', () => {
         .get('/api/search')
         .set('Authorization', `Bearer ${token}`)
         .expect(400);
-      expect(res.body.error.code).toBe('VALIDATION');
+      // NestJS ValidationPipe defaults to { statusCode: 400,
+      // message, error: 'Bad Request' }. The contract here is
+      // "the server rejects the request when ?q is missing",
+      // which is satisfied by the 400 status + presence of the
+      // ``message`` field listing the failed constraint.
+      expect(res.body.statusCode).toBe(400);
+      expect(Array.isArray(res.body.message)).toBe(true);
+      expect(
+        (res.body.message as string[]).some((m) => m.includes('q')),
+      ).toBe(true);
     } finally {
       await app.close();
     }
