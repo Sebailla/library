@@ -140,4 +140,33 @@ describeDb('BooksRepository', () => {
       expect(all[i].id).toBeGreaterThan(all[i - 1].id);
     }
   });
+
+  it('search uses pgroonga to find books by title fragment', async () => {
+    const authorId = await insertAuthor('García', 'Márquez');
+    await repo.insert({
+      title: 'Cien años de soledad',
+      authorId,
+      filePath: '/library/garcia/cien-anios.epub',
+      fileSizeBytes: 100,
+      contentHash: 'soledad',
+      excerpt: 'Muchos años después…',
+    });
+    await repo.insert({
+      title: 'El amor en los tiempos del cólera',
+      authorId,
+      filePath: '/library/garcia/amor.epub',
+      fileSizeBytes: 100,
+      contentHash: 'colera',
+    });
+    await repo.insert({
+      title: 'La hojarasca',
+      authorId,
+      filePath: '/library/garcia/hojarasca.epub',
+      fileSizeBytes: 100,
+      contentHash: 'hojarasca',
+    });
+    const hits = await repo.search('soledad');
+    expect(hits).toHaveLength(1);
+    expect(hits[0].title).toBe('Cien años de soledad');
+  });
 });

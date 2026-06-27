@@ -45,9 +45,9 @@ skipIfNoDb('migration runner', () => {
   it('lists migration files in lexicographic order', async () => {
     const files = await loadMigrations(path.join(repoRoot, 'migrations'));
     const names = files.map((f) => f.name);
-    // At minimum, the 001-007 files shipped through PR-2B commit 7
-    // must be picked up. Subsequent commits add 008-009; those are
-    // verified by their own commits.
+    // At minimum, the 001-008 files shipped through PR-2B commit 9
+    // must be picked up. Subsequent commits add 009; verified by
+    // its own commit.
     expect(names).toEqual(
       expect.arrayContaining([
         '001_extensions.sql',
@@ -57,6 +57,7 @@ skipIfNoDb('migration runner', () => {
         '005_book_categories.sql',
         '006_sagas.sql',
         '007_downloads.sql',
+        '008_pgroonga_indexes.sql',
       ]),
     );
     // Order must be lexicographic (which equals numeric for fixed-
@@ -65,7 +66,7 @@ skipIfNoDb('migration runner', () => {
     expect(names).toEqual(sorted);
   });
 
-  it('applies migrations 001-007 cleanly against a fresh schema', async () => {
+  it('applies migrations 001-008 cleanly against a fresh schema', async () => {
     const result = await runMigrations({
       connectionString,
       migrationsDir: path.join(repoRoot, 'migrations'),
@@ -79,6 +80,7 @@ skipIfNoDb('migration runner', () => {
         '005_book_categories.sql',
         '006_sagas.sql',
         '007_downloads.sql',
+        '008_pgroonga_indexes.sql',
       ]),
     );
 
@@ -162,6 +164,17 @@ skipIfNoDb('migration runner', () => {
         'completed',
         'ip_address',
         'user_agent',
+      ]);
+
+      // pgroonga indexes on books.title and books.excerpt must be
+      // present after migration 008 runs. This is the explicit
+      // acceptance criterion for the FTS-ready schema.
+      const pgIdx = await pool.query<{ indexname: string }>(
+        "SELECT indexname FROM pg_indexes WHERE tablename = 'books' AND indexname LIKE '%pgroonga%' ORDER BY indexname",
+      );
+      expect(pgIdx.rows.map((r) => r.indexname)).toEqual([
+        'books_excerpt_pgroonga_idx',
+        'books_title_pgroonga_idx',
       ]);
     } finally {
       await pool.end();
