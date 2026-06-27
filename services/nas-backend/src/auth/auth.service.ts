@@ -5,8 +5,7 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
-import * as bcrypt from 'bcrypt';
-import { randomBytes, randomUUID } from 'crypto';
+import { createHash, randomBytes, randomUUID } from 'crypto';
 import { DEVICES_REPOSITORY, DevicesRepository } from './devices.repository';
 
 /** Stable error codes returned to the HTTP layer. */
@@ -43,6 +42,26 @@ export interface RefreshInput {
 }
 
 /**
+ * Hash a JWT to a fixed-length opaque token suitable for equality
+ * comparison.
+ *
+ * bcrypt is the obvious candidate but it silently truncates input
+ * to 72 bytes (a limitation of the algorithm itself). Two distinct
+ * JWTs minted in the same second for the same device — they only
+ * differ in the ``jti`` claim which sits past the 72-byte mark —
+ * would hash to the same bcrypt digest and the rotation check
+ * would falsely pass.
+ *
+ * SHA-256 has no length limit and is deterministic, which is what
+ * we actually want here. The token already carries 256+ bits of
+ * entropy from the random ``jti`` so the hash is also safe to
+ * store at rest.
+ */
+function hashToken(token: string): string {
+  return createHash('sha256').update(token, 'utf8').digest('hex');
+}
+
+/**
  * Auth service — owns PIN validation, JWT minting, and device
  * persistence.
  *
@@ -54,9 +73,9 @@ export interface RefreshInput {
  *   NAS_JWT_SECRET    — HMAC secret for the JWT (default "dev-secret-change-me")
  *   NAS_JWT_TTL_HOURS — JWT lifetime in hours (default 24)
  *
- * ``tokenHash`` stored in the ``devices`` table is the bcrypt
+ * ``tokenHash`` stored in the ``devices`` table is the SHA-256
  * digest of the issued JWT so a stolen DB row does not yield a
- * usable bearer token.
+ * usable bearer token and ``refresh`` rotation can be observed.
  */
 @Injectable()
 export class AuthService {
@@ -95,7 +114,7 @@ export class AuthService {
     const deviceId = randomUUID();
     const expiresAtSeconds = this.computeExpiry();
     const token = await this.mintToken(deviceId, expiresAtSeconds);
-    const tokenHash = await bcrypt.hash(token, 10);
+    const tokenHash = hashToken(token);
     await this.devices.insert({
       deviceId,
       deviceName: input.deviceName,
@@ -137,7 +156,7 @@ export class AuthService {
         error: { code: 'TOKEN_INVALID', message: 'Unknown device' },
       });
     }
-    const stillValid = await bcrypt.compare(input.token, device.tokenHash);
+    const stillValid = hashToken(input.token) === device.tokenHash;
     if (!stillValid) {
       throw new UnauthorizedException({
         error: { code: 'TOKEN_INVALID', message: 'Token revoked' },
@@ -146,7 +165,7 @@ export class AuthService {
 
     const expiresAtSeconds = this.computeExpiry();
     const newToken = await this.mintToken(device.deviceId, expiresAtSeconds);
-    const newHash = await bcrypt.hash(newToken, 10);
+    const newHash = hashToken(newToken);
     await this.devices.updateTokenHash(device.deviceId, newHash);
 
     return {
@@ -181,7 +200,7 @@ export class AuthService {
         error: { code: 'TOKEN_INVALID', message: 'Unknown device' },
       });
     }
-    const stillValid = await bcrypt.compare(token, device.tokenHash);
+    const stillValid = hashToken(token) === device.tokenHash;
     if (!stillValid) {
       throw new UnauthorizedException({
         error: { code: 'TOKEN_INVALID', message: 'Token revoked' },

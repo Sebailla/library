@@ -187,8 +187,9 @@ describe('POST /api/auth/pair', () => {
       const stored = await devices.findByDeviceId(res.body.device_id);
       expect(stored).not.toBeNull();
       expect(stored?.deviceName).toBe('iPad de Seba');
-      expect(stored?.tokenHash).not.toBe(res.body.token); // bcrypt hash, not raw JWT
-      expect((stored?.tokenHash ?? '').length).toBeGreaterThan(20);
+      expect(stored?.tokenHash).not.toBe(res.body.token); // SHA-256 hash, not raw JWT
+      // SHA-256 hex is exactly 64 chars.
+      expect(stored?.tokenHash).toMatch(/^[0-9a-f]{64}$/);
     } finally {
       await app.close();
     }
@@ -217,6 +218,41 @@ describe('POST /api/auth/refresh', () => {
       expect(typeof refreshed.body.token).toBe('string');
       expect(refreshed.body.token).not.toBe(oldToken);
       expect(typeof refreshed.body.expires_at).toBe('string');
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('invalidates the old token immediately after refresh', async () => {
+    const { app } = await buildApp();
+    try {
+      const pair = await request(app.getHttpServer())
+        .post('/api/auth/pair')
+        .send({ pin: '0000', device_name: 'iPad' })
+        .expect(201);
+      const oldToken = pair.body.token as string;
+
+      // Refresh rotates T1 → T2.
+      const refreshed = await request(app.getHttpServer())
+        .post('/api/auth/refresh')
+        .send({ token: oldToken })
+        .expect(201);
+      const newToken = refreshed.body.token as string;
+
+      // T1 must no longer authenticate against ``/api/me``.
+      const meOld = await request(app.getHttpServer())
+        .get('/api/me')
+        .set('Authorization', `Bearer ${oldToken}`)
+        .expect(401);
+      expect(meOld.body.error.code).toMatch(/TOKEN_INVALID|TOKEN_EXPIRED/);
+
+      // T2 must still work — the device row was NOT deleted, only
+      // its ``token_hash`` rotated.
+      const meNew = await request(app.getHttpServer())
+        .get('/api/me')
+        .set('Authorization', `Bearer ${newToken}`)
+        .expect(200);
+      expect(meNew.body.device_id).toBe(pair.body.device_id);
     } finally {
       await app.close();
     }

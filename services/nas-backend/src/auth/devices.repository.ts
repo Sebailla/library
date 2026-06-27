@@ -51,7 +51,7 @@ const COLUMNS =
 /**
  * Repository contract for the ``devices`` table.
  *
- * ``tokenHash`` stores the bcrypt digest of the issued JWT, never
+ * ``tokenHash`` stores the SHA-256 digest of the issued JWT, never
  * the raw token. ``updateTokenHash`` is used by ``refresh`` to
  * rotate the stored hash atomically.
  */
