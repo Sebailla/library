@@ -2,7 +2,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { INestApplication, ValidationPipe } from '@nestjs/common';
 import request from 'supertest';
 import { AppModule } from '../src/app.module';
-import { DevicesRepository } from '../src/auth/devices.repository';
+import { DEVICES_REPOSITORY } from '../src/auth/devices.repository';
 
 /**
  * End-to-end contract tests for the auth pair + refresh endpoints
@@ -111,7 +111,7 @@ async function buildApp(opts: {
   const moduleRef: TestingModule = await Test.createTestingModule({
     imports: [AppModule],
   })
-    .overrideProvider(DevicesRepository)
+    .overrideProvider(DEVICES_REPOSITORY)
     .useValue(devices)
     .compile();
   const app = moduleRef.createNestApplication();
@@ -137,7 +137,8 @@ describe('POST /api/auth/pair', () => {
       expect(typeof res.body.expires_at).toBe('string');
       const expiresAt = new Date(res.body.expires_at).toISOString();
       expect(expiresAt).toBe(res.body.expires_at);
-      expect(expiresAt).toBeGreaterThan(new Date().toISOString());
+      // expires_at must be in the future.
+      expect(new Date(expiresAt).getTime()).toBeGreaterThan(Date.now());
       expect(typeof res.body.device_id).toBe('string');
       expect(res.body.device_id).toMatch(
         /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
