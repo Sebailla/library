@@ -45,14 +45,16 @@ skipIfNoDb('migration runner', () => {
   it('lists migration files in lexicographic order', async () => {
     const files = await loadMigrations(path.join(repoRoot, 'migrations'));
     const names = files.map((f) => f.name);
-    // At minimum, the 001-003 files shipped in PR-2B commit 1 must
-    // be picked up. Subsequent commits add 004-009; those are
+    // At minimum, the 001-005 files shipped through PR-2B commit 4
+    // must be picked up. Subsequent commits add 006-009; those are
     // verified by their own commits.
     expect(names).toEqual(
       expect.arrayContaining([
         '001_extensions.sql',
         '002_authors.sql',
         '003_books.sql',
+        '004_categories.sql',
+        '005_book_categories.sql',
       ]),
     );
     // Order must be lexicographic (which equals numeric for fixed-
@@ -61,7 +63,7 @@ skipIfNoDb('migration runner', () => {
     expect(names).toEqual(sorted);
   });
 
-  it('applies migrations 001-003 cleanly against a fresh schema', async () => {
+  it('applies migrations 001-005 cleanly against a fresh schema', async () => {
     const result = await runMigrations({
       connectionString,
       migrationsDir: path.join(repoRoot, 'migrations'),
@@ -71,12 +73,14 @@ skipIfNoDb('migration runner', () => {
         '001_extensions.sql',
         '002_authors.sql',
         '003_books.sql',
+        '004_categories.sql',
+        '005_book_categories.sql',
       ]),
     );
 
     // After the run, the pgroonga + pgcrypto extensions must be
-    // installed and the books table must exist with the expected
-    // shape.
+    // installed and the categories + book_categories tables must
+    // exist with the expected shape.
     const pool = new Pool({ connectionString });
     try {
       const exts = await pool.query<{ extname: string }>(
@@ -87,33 +91,37 @@ skipIfNoDb('migration runner', () => {
         'pgroonga',
       ]);
 
-      const booksCols = await pool.query<{ column_name: string }>(
-        "SELECT column_name FROM information_schema.columns WHERE table_name = 'books' ORDER BY ordinal_position",
+      const catCols = await pool.query<{ column_name: string }>(
+        "SELECT column_name FROM information_schema.columns WHERE table_name = 'categories' ORDER BY ordinal_position",
       );
-      const bookColNames = booksCols.rows.map((r) => r.column_name);
-      expect(bookColNames).toEqual([
+      expect(catCols.rows.map((r) => r.column_name)).toEqual([
         'id',
-        'title',
-        'author_id',
-        'year',
-        'language',
-        'format',
-        'file_path',
-        'file_size_bytes',
-        'content_hash',
-        'cover_path',
-        'excerpt',
-        'indexed_at',
+        'path',
+        'name_es',
+        'name_en',
+        'parent_id',
+        'depth',
+        'created_at',
       ]);
 
-      const authorCols = await pool.query<{ column_name: string }>(
-        "SELECT column_name FROM information_schema.columns WHERE table_name = 'authors' ORDER BY ordinal_position",
+      const aliasCols = await pool.query<{ column_name: string }>(
+        "SELECT column_name FROM information_schema.columns WHERE table_name = 'category_aliases' ORDER BY ordinal_position",
       );
-      expect(authorCols.rows.map((r) => r.column_name)).toEqual([
-        'id',
-        'lastname',
-        'firstname',
+      expect(aliasCols.rows.map((r) => r.column_name)).toEqual([
+        'category_id',
+        'alias',
+        'locale',
         'created_at',
+      ]);
+
+      const bridgeCols = await pool.query<{ column_name: string }>(
+        "SELECT column_name FROM information_schema.columns WHERE table_name = 'book_categories' ORDER BY ordinal_position",
+      );
+      expect(bridgeCols.rows.map((r) => r.column_name)).toEqual([
+        'book_id',
+        'category_id',
+        'confidence',
+        'source',
       ]);
     } finally {
       await pool.end();
