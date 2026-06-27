@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { DatabaseModule } from './database/database.module';
 import { HealthModule } from './health/health.module';
 import { AuthModule } from './auth/auth.module';
+import { MeModule } from './me/me.module';
 
 /**
  * Root NestJS module for the NAS backend.
@@ -21,6 +22,6 @@ import { AuthModule } from './auth/auth.module';
  * - PR-2F: ``DiscoveryModule`` (mDNS + Tailscale)
  */
 @Module({
-  imports: [DatabaseModule, HealthModule, AuthModule],
+  imports: [DatabaseModule, HealthModule, AuthModule, MeModule],
 })
 export class AppModule {}
