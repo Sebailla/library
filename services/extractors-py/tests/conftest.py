@@ -299,6 +299,45 @@ def minimal_audio(tmp_path: Path) -> Path:
 
 
 @pytest.fixture()
+def minimal_audio_with_tags(tmp_path: Path) -> Path:
+    """Build a tiny WAV with ID3 tags so mutagen can extract real metadata.
+
+    Skips the fixture if mutagen is not importable — in that
+    environment the wrapper falls back to the filename stem and the
+    mutagen-missing test path covers the contract. We use ``mutagen.wave.WAVE``
+    rather than building a raw MP3 frame by hand; ``WAVE.add_tags()``
+    writes an ``ID3 `` chunk into the RIFF container that
+    ``mutagen.File()`` picks up when scanning the file.
+    """
+    pytest.importorskip("mutagen")
+    import wave
+    from mutagen.id3 import ID3NoHeaderError, TIT2, TPE1
+    from mutagen.wave import WAVE
+
+    out = tmp_path / "fixture-tagged.wav"
+    with wave.open(str(out), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(8000)
+        # 0.5s of silence so mutagen's WaveStreamInfo has a positive
+        # length to report.
+        w.writeframes(b"\x00\x00" * 4000)
+
+    wav = WAVE(out)
+    try:
+        wav.add_tags()
+    except ID3NoHeaderError:
+        # If the container pre-existed with no ID3 block, force it.
+        from mutagen.id3 import ID3
+
+        wav.tags = ID3()
+    wav.tags.add(TIT2(encoding=3, text="Sidecar Audio Fixture"))
+    wav.tags.add(TPE1(encoding=3, text="Sidecar Test Suite"))
+    wav.save()
+    return out
+
+
+@pytest.fixture()
 def minimal_video(tmp_path: Path) -> Path:
     """Build a placeholder MP4 file. The MVP extractor falls back to a
     minimal metadata dict when ffprobe is missing, but the file must at
