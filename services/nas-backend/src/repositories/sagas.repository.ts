@@ -45,6 +45,7 @@ export interface SagasRepository {
   insert(saga: NewSaga): Promise<Saga>;
   attachBook(link: BookSagaLink): Promise<void>;
   listByAuthor(authorId: number): Promise<Saga[]>;
+  listForBook(bookId: number): Promise<Saga[]>;
   listBooksInSaga(sagaId: number): Promise<BookSagaLink[]>;
   close(): Promise<void>;
 }
@@ -83,6 +84,18 @@ export class PgSagasRepository implements SagasRepository {
     const res = await this.pool.query<SagaRow>(
       `SELECT ${COLUMNS} FROM sagas WHERE author_id = $1 ORDER BY name ASC`,
       [authorId],
+    );
+    return res.rows.map(rowToSaga);
+  }
+
+  async listForBook(bookId: number): Promise<Saga[]> {
+    const res = await this.pool.query<SagaRow>(
+      `SELECT s.id, s.name, s.author_id, s.created_at
+       FROM sagas s
+       JOIN book_sagas bs ON bs.saga_id = s.id
+       WHERE bs.book_id = $1
+       ORDER BY s.name ASC`,
+      [bookId],
     );
     return res.rows.map(rowToSaga);
   }

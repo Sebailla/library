@@ -180,9 +180,9 @@ In docker-compose these are wired to the in-stack service names
 
 ## What's NOT here yet
 
-PR-2C is the auth slice. The following land in chained PRs:
+PR-2D is the catalog HTTP slice (`BooksModule`, `AuthorsModule`,
+`SearchModule`). The following land in chained PRs:
 
-- **PR-2D**: `BooksModule`, `SearchModule` (HTTP routes)
 - **PR-2E**: `DownloadsModule`, `WorkersModule` (BullMQ + sidecar spawn)
 - **PR-2F**: `DiscoveryModule` (mDNS + Tailscale)
 
@@ -231,11 +231,13 @@ pgroonga instance.
 
 | Repository | Methods |
 |------------|---------|
-| `BooksRepository` | `insert`, `findById`, `listByAuthor`, `list`, `search` |
-| `CategoriesRepository` | `insert`, `findByPath`, `listChildren`, `findSubtree` (recursive CTE) |
-| `SagasRepository` | `insert`, `attachBook` (idempotent), `listByAuthor`, `listBooksInSaga` |
+| `AuthorsRepository` | `insert`, `findById`, `list`, `count` |
+| `BooksRepository` | `insert`, `findById`, `listByAuthor`, `list` (+filters), `count`, `search` |
+| `CategoriesRepository` | `insert`, `findByPath`, `listChildren`, `listRoots`, `listForBook`, `findSubtree` (recursive CTE) |
+| `SagasRepository` | `insert`, `attachBook` (idempotent), `listByAuthor`, `listForBook`, `listBooksInSaga` |
 | `DownloadsRepository` | `insert`, `markCompleted`, `listByDevice`, `findById` |
 | `DevicesRepository` | `insert`, `findByDeviceId`, `updateTokenHash`, `touch` |
+| `SearchRepository` | `search` (pgroonga `&@~` + `pgroonga.score(tableoid)`) |
 
 ## Auth (PR-2C)
 
@@ -292,8 +294,72 @@ The `token_hash` column stores the SHA-256 hex digest of the raw
 JWT — not bcrypt — for one specific reason: bcrypt silently
 truncates input to 72 bytes. Two JWTs minted for the same device
 in the same second only differ in their `jti` claim, which sits
-past the 72-byte mark in the payload. bcrypt would map them to
-the same digest and `/api/auth/refresh` would falsely accept the
-old token after rotation. SHA-256 has no length limit and the
-JWT already carries 256+ bits of entropy from its random `jti`,
+past the 72-byte mark in the payload. bcrypt would map them to the
+same digest and `/api/auth/refresh` would falsely accept the old
+token after rotation. SHA-256 has no length limit and the JWT
+already carries 256+ bits of entropy from its random `jti`,
 so it is safe to store at rest.
+
+## Catalog HTTP routes (PR-2D)
+
+All catalog endpoints require a valid Bearer token. The wire format
+is snake_case to match the rest of the API.
+
+```
+GET /api/books?page=1&limit=20&author_id=...&format=...&language=...
+  Headers: Authorization: Bearer <jwt>
+  200 OK:  { data: [BookDto, …], page, limit, total }
+  Defaults: page=1, limit=20, max limit=100.
+
+GET /api/books/:id
+  Headers: Authorization: Bearer <jwt>
+  200 OK:  BookDetailDto
+            { id, title, author_id, year, language, format,
+              file_path, cover_path, excerpt, indexed_at,
+              file_size_bytes, content_hash,
+              categories: [{id, path, name_es, name_en}],
+              sagas:     [{id, name, author_id}] }
+  404:     { error: { code: "NOT_FOUND", message } }
+
+GET /api/authors?page=1&limit=20
+  Headers: Authorization: Bearer <jwt>
+  200 OK:  { data: [AuthorDto, …], page, limit, total }
+
+GET /api/authors/:id
+  Headers: Authorization: Bearer <jwt>
+  200 OK:  AuthorDetailDto
+            { id, lastname, firstname,
+              books: [{id, title, file_path}] }
+  404:     { error: { code: "NOT_FOUND", message } }
+
+GET /api/categories
+  Headers: Authorization: Bearer <jwt>
+  200 OK:  { data: [CategoryDto, …] }
+            Each node carries its descendants recursively under
+            the ``children`` key. The tree is fetched via the
+            ``WITH RECURSIVE`` CTE exposed by
+            ``CategoriesRepository.findSubtree``.
+
+GET /api/search?q=...&limit=20&offset=0
+  Headers: Authorization: Bearer <jwt>
+  200 OK:  { data: SearchHitDto[], query, limit, offset, total }
+            Hits are ranked by pgroonga score (descending). Uses
+            the ``books_title_pgroonga_idx`` index (migration 008)
+            so the query plan stays index-only as the catalog
+            grows.
+  400:     missing/empty ``q`` → NestJS ValidationPipe default.
+```
+
+### Module map
+
+| Module | Controller routes | Service | Repositories |
+|--------|-------------------|---------|--------------|
+| `BooksModule` | `/api/books`, `/api/books/:id`, `/api/categories` | `BooksService`, `CategoriesService` | `BooksRepository`, `CategoriesRepository`, `SagasRepository` |
+| `AuthorsModule` | `/api/authors`, `/api/authors/:id` | `AuthorsService` | `AuthorsRepository`, `BooksRepository` (re-exported) |
+| `SearchModule` | `/api/search` | `SearchService` | `SearchRepository` |
+
+Each repository is exposed via a string token
+(`BOOKS_REPOSITORY`, `AUTHORS_REPOSITORY`,
+`CATEGORIES_REPOSITORY`, `SAGAS_REPOSITORY`, `SEARCH_REPOSITORY`)
+so e2e tests can override the implementation with an in-memory
+stub via `Test.createTestingModule(...).overrideProvider(...)`.
