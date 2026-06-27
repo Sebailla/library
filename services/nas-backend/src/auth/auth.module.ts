@@ -1,7 +1,10 @@
 import { Module } from '@nestjs/common';
 import { JwtModule } from '@nestjs/jwt';
+import { PassportModule } from '@nestjs/passport';
 import { AuthController } from './auth.controller';
 import { AuthService } from './auth.service';
+import { JwtAuthGuard } from './jwt-auth.guard';
+import { JwtStrategy } from './jwt.strategy';
 import {
   DEVICES_REPOSITORY,
   DevicesRepository,
@@ -12,12 +15,12 @@ import { PG_POOL } from '../database/pg.service';
 import { Pool } from 'pg';
 
 /**
- * Auth module — PIN pairing, JWT issuance, device persistence.
- *
- * Wires:
+ * Auth module — PIN pairing, JWT issuance, device persistence,
+ * Bearer-token guard.
  *
  *   POST /api/auth/pair    → AuthController.pair    → AuthService.pair
  *   POST /api/auth/refresh → AuthController.refresh → AuthService.refresh
+ *   Bearer protection      → JwtAuthGuard           → AuthService.resolveBearer
  *
  * ``DevicesRepository`` is exposed via the ``DEVICES_REPOSITORY``
  * string token so e2e tests can override it with an in-memory
@@ -28,6 +31,7 @@ import { Pool } from 'pg';
 @Module({
   imports: [
     DatabaseModule,
+    PassportModule,
     JwtModule.registerAsync({
       useFactory: () => ({
         secret: process.env.NAS_JWT_SECRET ?? 'dev-secret-change-me',
@@ -38,6 +42,8 @@ import { Pool } from 'pg';
   controllers: [AuthController],
   providers: [
     AuthService,
+    JwtStrategy,
+    JwtAuthGuard,
     {
       provide: DEVICES_REPOSITORY,
       inject: [PG_POOL],
@@ -45,6 +51,6 @@ import { Pool } from 'pg';
         new PgDevicesRepository(pool),
     },
   ],
-  exports: [AuthService, DEVICES_REPOSITORY],
+  exports: [AuthService, JwtAuthGuard, DEVICES_REPOSITORY],
 })
 export class AuthModule {}
