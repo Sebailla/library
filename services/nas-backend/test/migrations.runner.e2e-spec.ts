@@ -45,9 +45,7 @@ skipIfNoDb('migration runner', () => {
   it('lists migration files in lexicographic order', async () => {
     const files = await loadMigrations(path.join(repoRoot, 'migrations'));
     const names = files.map((f) => f.name);
-    // At minimum, the 001-008 files shipped through PR-2B commit 9
-    // must be picked up. Subsequent commits add 009; verified by
-    // its own commit.
+    // All nine migrations shipped in PR-2B must be present.
     expect(names).toEqual(
       expect.arrayContaining([
         '001_extensions.sql',
@@ -58,6 +56,7 @@ skipIfNoDb('migration runner', () => {
         '006_sagas.sql',
         '007_downloads.sql',
         '008_pgroonga_indexes.sql',
+        '009_seed_categories.sql',
       ]),
     );
     // Order must be lexicographic (which equals numeric for fixed-
@@ -66,7 +65,7 @@ skipIfNoDb('migration runner', () => {
     expect(names).toEqual(sorted);
   });
 
-  it('applies migrations 001-008 cleanly against a fresh schema', async () => {
+  it('applies all migrations cleanly against a fresh schema', async () => {
     const result = await runMigrations({
       connectionString,
       migrationsDir: path.join(repoRoot, 'migrations'),
@@ -81,6 +80,7 @@ skipIfNoDb('migration runner', () => {
         '006_sagas.sql',
         '007_downloads.sql',
         '008_pgroonga_indexes.sql',
+        '009_seed_categories.sql',
       ]),
     );
 
@@ -176,6 +176,44 @@ skipIfNoDb('migration runner', () => {
         'books_excerpt_pgroonga_idx',
         'books_title_pgroonga_idx',
       ]);
+
+      // Migration 009 seeds a small bilingual taxonomy. The
+      // categories table must contain at least the top-level nodes
+      // with their ``name_es`` / ``name_en`` pairs.
+      const seed = await pool.query<{
+        id: string;
+        path: string;
+        name_es: string;
+        name_en: string;
+        depth: number;
+        parent_id: string | null;
+      }>(
+        "SELECT id, path, name_es, name_en, depth, parent_id FROM categories ORDER BY path ASC",
+      );
+      const paths = seed.rows.map((r) => r.path);
+      expect(paths).toEqual(
+        expect.arrayContaining([
+          '/ciencia',
+          '/ciencia/biologia',
+          '/ciencia/biologia/zoologia',
+          '/arte',
+          '/arte/pintura',
+          '/literatura',
+          '/literatura/novela',
+        ]),
+      );
+      const ciencia = seed.rows.find((r) => r.path === '/ciencia');
+      expect(ciencia?.name_es).toBe('Ciencia');
+      expect(ciencia?.name_en).toBe('Science');
+      expect(ciencia?.depth).toBe(0);
+      expect(ciencia?.parent_id).toBeNull();
+
+      const biologia = seed.rows.find((r) => r.path === '/ciencia/biologia');
+      expect(biologia?.depth).toBe(1);
+      // Parent wiring must be set by the UPDATE in the same
+      // migration so ``findSubtree`` has a populated ``parent_id``
+      // to traverse from.
+      expect(biologia?.parent_id).toBe(ciencia?.id);
     } finally {
       await pool.end();
     }

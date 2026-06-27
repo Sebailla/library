@@ -1,5 +1,5 @@
 import { Pool, PoolClient } from 'pg';
-import { runMigrations } from '../scripts/migrate';
+import { runMigrations } from '../../scripts/migrate';
 
 /**
  * Test fixtures for the repository test suites.
