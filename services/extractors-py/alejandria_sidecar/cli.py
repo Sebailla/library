@@ -113,6 +113,88 @@ def _handle_extract(args: argparse.Namespace) -> int:
     return EXIT_INVALID_ARGS
 
 
+# Exit-code mapping for the ``ocr`` subcommand. Kept separate from the
+# ``_EXTRACT_ERROR_EXIT_CODE`` table because OCR has its own error
+# vocabulary (BACKEND_UNAVAILABLE is OCR-specific) and we want the
+# dispatch contract testable without a real backend implementation.
+_OCR_ERROR_EXIT_CODE: dict[str, int] = {
+    "FILE_UNREADABLE": EXIT_FILE_UNREADABLE,
+    "BACKEND_UNAVAILABLE": EXIT_BACKEND_UNAVAILABLE,
+    "NOT_IMPLEMENTED": EXIT_INVALID_ARGS,
+}
+
+
+def _handle_ocr(args: argparse.Namespace) -> int:
+    """Dispatch the ``ocr`` subcommand to the right backend.
+
+    Today this only handles the *dispatch contract* — flag parsing,
+    file-exists short-circuit, and backend availability check. The
+    actual OCR call lands when the per-backend wrapper module ships
+    (Phase 1 task 1.4). Until then the contract surface emits a
+    ``NOT_IMPLEMENTED`` envelope so consumers can integrate against
+    the flag set without false confidence.
+
+    Order of checks is significant: file existence is checked first so
+    callers can distinguish "your file vanished" from "your backend is
+    missing" — the two error codes carry different remediation steps.
+    """
+    from pathlib import Path  # local import keeps top-of-file cost minimal
+
+    raw = Path(args.path)
+    payload: dict[str, Any]
+
+    # 1. File must exist on disk; we can't even open it otherwise.
+    if not raw.exists():
+        payload = {
+            "schema_version": SCHEMA_VERSION,
+            "backend": getattr(args, "backend", None),
+            "lang": getattr(args, "lang", None),
+            "path": str(raw),
+            "error": {
+                "code": "FILE_UNREADABLE",
+                "message": f"path not found: {raw}",
+            },
+        }
+        _emit(payload)
+        return _OCR_ERROR_EXIT_CODE["FILE_UNREADABLE"]
+
+    # 2. Backend selection. ``unlimited`` is reserved for the future
+    # cloud backend (Phase 4 task 4.2) and is NOT implemented in the
+    # MVP factory — surface this as BACKEND_UNAVAILABLE so consumers
+    # can branch without falling back to a different backend silently.
+    if getattr(args, "backend", None) == "unlimited":
+        payload = {
+            "schema_version": SCHEMA_VERSION,
+            "backend": args.backend,
+            "lang": getattr(args, "lang", None),
+            "path": str(raw),
+            "error": {
+                "code": "BACKEND_UNAVAILABLE",
+                "message": (
+                    f"backend 'unlimited' is not implemented in this build"
+                ),
+            },
+        }
+        _emit(payload)
+        return _OCR_ERROR_EXIT_CODE["BACKEND_UNAVAILABLE"]
+
+    # 3. Backend wiring is pending (Phase 1 task 1.4). Emit a stable
+    # NOT_IMPLEMENTED envelope so consumers have something parseable
+    # while the wrapper ships.
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "backend": getattr(args, "backend", None),
+        "lang": getattr(args, "lang", None),
+        "path": str(raw),
+        "error": {
+            "code": "NOT_IMPLEMENTED",
+            "message": "ocr subcommand wiring is pending (Phase 1 task 1.4)",
+        },
+    }
+    _emit(payload)
+    return _OCR_ERROR_EXIT_CODE["NOT_IMPLEMENTED"]
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Construct the top-level argument parser.
 
@@ -145,11 +227,26 @@ def build_parser() -> argparse.ArgumentParser:
 
     ocr = subparsers.add_parser(
         "ocr",
-        help="Run OCR on an image or PDF (NOT IMPLEMENTED YET)",
+        help="Run OCR on an image or PDF",
         description="Run OCR on an image or PDF.",
     )
     ocr.add_argument("path", help="Absolute path to the input file")
-    ocr.set_defaults(handler=lambda args: _stub_handler("ocr", args))
+    # The spec mandates --backend {vision|tesseract|unlimited} and a
+    # --lang flag with default ``es``. ``unlimited`` is reserved for the
+    # future cloud backend (Phase 4 task 4.2) and is treated as
+    # unavailable today — the MVP factory has no implementation for it.
+    ocr.add_argument(
+        "--backend",
+        choices=("vision", "tesseract", "unlimited"),
+        default="vision",
+        help="OCR backend to use (default: %(default)s)",
+    )
+    ocr.add_argument(
+        "--lang",
+        default="es",
+        help="BCP-47 language code passed to the backend (default: %(default)s)",
+    )
+    ocr.set_defaults(handler=_handle_ocr)
 
     scan = subparsers.add_parser(
         "scan",
