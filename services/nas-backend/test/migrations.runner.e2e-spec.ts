@@ -45,8 +45,8 @@ skipIfNoDb('migration runner', () => {
   it('lists migration files in lexicographic order', async () => {
     const files = await loadMigrations(path.join(repoRoot, 'migrations'));
     const names = files.map((f) => f.name);
-    // At minimum, the 001-005 files shipped through PR-2B commit 4
-    // must be picked up. Subsequent commits add 006-009; those are
+    // At minimum, the 001-007 files shipped through PR-2B commit 7
+    // must be picked up. Subsequent commits add 008-009; those are
     // verified by their own commits.
     expect(names).toEqual(
       expect.arrayContaining([
@@ -55,6 +55,8 @@ skipIfNoDb('migration runner', () => {
         '003_books.sql',
         '004_categories.sql',
         '005_book_categories.sql',
+        '006_sagas.sql',
+        '007_downloads.sql',
       ]),
     );
     // Order must be lexicographic (which equals numeric for fixed-
@@ -63,7 +65,7 @@ skipIfNoDb('migration runner', () => {
     expect(names).toEqual(sorted);
   });
 
-  it('applies migrations 001-005 cleanly against a fresh schema', async () => {
+  it('applies migrations 001-007 cleanly against a fresh schema', async () => {
     const result = await runMigrations({
       connectionString,
       migrationsDir: path.join(repoRoot, 'migrations'),
@@ -75,6 +77,8 @@ skipIfNoDb('migration runner', () => {
         '003_books.sql',
         '004_categories.sql',
         '005_book_categories.sql',
+        '006_sagas.sql',
+        '007_downloads.sql',
       ]),
     );
 
@@ -122,6 +126,42 @@ skipIfNoDb('migration runner', () => {
         'category_id',
         'confidence',
         'source',
+      ]);
+
+      const sagaCols = await pool.query<{ column_name: string }>(
+        "SELECT column_name FROM information_schema.columns WHERE table_name = 'sagas' ORDER BY ordinal_position",
+      );
+      expect(sagaCols.rows.map((r) => r.column_name)).toEqual([
+        'id',
+        'name',
+        'author_id',
+        'created_at',
+      ]);
+
+      const bookSagasCols = await pool.query<{ column_name: string }>(
+        "SELECT column_name FROM information_schema.columns WHERE table_name = 'book_sagas' ORDER BY ordinal_position",
+      );
+      expect(bookSagasCols.rows.map((r) => r.column_name)).toEqual([
+        'book_id',
+        'saga_id',
+        'ordinal',
+      ]);
+
+      const downloadCols = await pool.query<{ column_name: string }>(
+        "SELECT column_name FROM information_schema.columns WHERE table_name = 'downloads' ORDER BY ordinal_position",
+      );
+      expect(downloadCols.rows.map((r) => r.column_name)).toEqual([
+        'id',
+        'book_id',
+        'device_id',
+        'device_name',
+        'user_id',
+        'downloaded_at',
+        'file_size_bytes',
+        'bytes_transferred',
+        'completed',
+        'ip_address',
+        'user_agent',
       ]);
     } finally {
       await pool.end();
