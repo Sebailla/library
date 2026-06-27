@@ -9,7 +9,8 @@ NestJS application that backs the **alejandria-v2** NAS catalog.
 > - **PR-2B** — Postgres schema, pgroonga indexes, idempotent
 >   migrations, repository layer (`books`, `categories`, `sagas`,
 >   `downloads`)
-> - **PR-2C** — `AuthModule`, device pairing
+> - **PR-2C** — `AuthModule`, device pairing, JWT validation,
+>   sample protected route (`GET /api/me`)
 > - **PR-2D** — `BooksModule`, `SearchModule`
 > - **PR-2E** — `DownloadsModule`, `WorkersModule` (BullMQ)
 > - **PR-2F** — `DiscoveryModule` (mDNS + Tailscale)
@@ -31,19 +32,31 @@ NestJS application that backs the **alejandria-v2** NAS catalog.
 services/nas-backend/
 ├── src/
 │   ├── main.ts                # NestJS bootstrap
-│   ├── app.module.ts          # root module (DatabaseModule + HealthModule)
+│   ├── app.module.ts          # root module (Database + Health + Auth + Me)
 │   ├── database/              # PR-2B — Postgres pool + DatabaseModule
 │   ├── repositories/          # PR-2B — books, categories, sagas, downloads
+│   ├── auth/                  # PR-2C — AuthModule, JWT, devices repo
+│   │   ├── auth.module.ts
+│   │   ├── auth.controller.ts # POST /api/auth/pair, POST /api/auth/refresh
+│   │   ├── auth.service.ts    # PIN validation, JWT mint, SHA-256 token hash
+│   │   ├── jwt.strategy.ts    # passport-jwt strategy
+│   │   ├── jwt-auth.guard.ts  # Bearer-token guard
+│   │   └── devices.repository.ts
+│   ├── me/                    # PR-2C — sample protected route
+│   │   ├── me.module.ts
+│   │   └── me.controller.ts   # GET /api/me
 │   └── health/
 │       ├── health.controller.ts
 │       ├── health.module.ts
 │       └── health.service.ts
-├── migrations/                # PR-2B — 001-009 idempotent SQL files
+├── migrations/                # PR-2B + PR-2C — 001-010 idempotent SQL files
 ├── scripts/
 │   ├── migrate.ts             # migration runner (library)
 │   └── migrate-cli.ts         # migration runner (CLI: `npm run migrate`)
 ├── test/
 │   ├── health.e2e-spec.ts     # supertest contract tests
+│   ├── auth.e2e-spec.ts       # PR-2C — pair + refresh contract
+│   ├── me.e2e-spec.ts         # PR-2C — protected route contract
 │   ├── migrations.runner.e2e-spec.ts   # runner + idempotency
 │   └── repositories/          # per-repository e2e contract tests
 ├── Dockerfile                 # multi-stage build
@@ -137,6 +150,16 @@ Coverage:
 | `CategoriesRepository` findSubtree | recursive CTE returns root + every descendant |
 | `SagasRepository` attachBook + listByAuthor | idempotent attach, per-author filter |
 | `DownloadsRepository` insert + markCompleted + listByDevice | ordered by `downloaded_at DESC` |
+| `POST /api/auth/pair` valid PIN | `201` `{token, expires_at, device_id}` (JWT-shaped) |
+| `POST /api/auth/pair` invalid PIN | `401` `error.code = BAD_PIN` |
+| `POST /api/auth/pair` expired PIN TTL | `401` `error.code = PIN_EXPIRED` |
+| `POST /api/auth/pair` persists device row | SHA-256 token_hash stored under returned `device_id` |
+| `POST /api/auth/refresh` valid token | `201` new token differs from previous |
+| `POST /api/auth/refresh` invalidates old token | old token returns `401` on `/api/me` after rotation |
+| `GET /api/me` no Bearer | `401` `error.code = UNAUTHORIZED` |
+| `GET /api/me` valid Bearer | `200` `{device_id, device_name}` |
+| `GET /api/me` tampered Bearer | `401` `error.code = TOKEN_INVALID` |
+| Migration runner — `010_devices.sql` applied | `devices` table has the documented columns |
 
 ## Environment variables
 
@@ -147,15 +170,18 @@ Coverage:
 | `REDIS_HOST` | `localhost` | ioredis host |
 | `REDIS_PORT` | `6379` | ioredis port |
 | `APP_VERSION` | `0.1.0` | overrides the version reported by `/health` |
+| `NAS_PAIR_PIN` | `0000` | single shared pairing PIN (PR-2C) |
+| `NAS_PIN_TTL_DAYS` | `30` | PIN window; `0` or negative ⇒ PIN is treated as expired (PR-2C) |
+| `NAS_JWT_SECRET` | `dev-secret-change-me` | HMAC secret for issued JWTs — **must** be set in prod (PR-2C) |
+| `NAS_JWT_TTL_HOURS` | `24` | JWT lifetime (PR-2C) |
 
 In docker-compose these are wired to the in-stack service names
 (`postgres`, `redis`).
 
 ## What's NOT here yet
 
-PR-2B is the data-layer slice. The following land in chained PRs:
+PR-2C is the auth slice. The following land in chained PRs:
 
-- **PR-2C**: `AuthModule`, device pairing
 - **PR-2D**: `BooksModule`, `SearchModule` (HTTP routes)
 - **PR-2E**: `DownloadsModule`, `WorkersModule` (BullMQ + sidecar spawn)
 - **PR-2F**: `DiscoveryModule` (mDNS + Tailscale)
@@ -181,7 +207,7 @@ DATABASE_URL=postgresql://alejandria:alejandria@localhost:5432/alejandria \
 DATABASE_URL=… npm run migrate
 ```
 
-Files shipped in PR-2B:
+Files shipped in PR-2B + PR-2C:
 
 | File | What it does |
 |------|--------------|
@@ -194,6 +220,7 @@ Files shipped in PR-2B:
 | `007_downloads.sql` | per-device download audit trail |
 | `008_pgroonga_indexes.sql` | pgroonga indexes on `books.title`, `books.excerpt` |
 | `009_seed_categories.sql` | bilingual taxonomy seed (Ciencia, Arte, Literatura, …) |
+| `010_devices.sql` | `devices` table — UUID + SHA-256 token hash + INET ip_address |
 
 ## Repositories
 
@@ -208,3 +235,65 @@ pgroonga instance.
 | `CategoriesRepository` | `insert`, `findByPath`, `listChildren`, `findSubtree` (recursive CTE) |
 | `SagasRepository` | `insert`, `attachBook` (idempotent), `listByAuthor`, `listBooksInSaga` |
 | `DownloadsRepository` | `insert`, `markCompleted`, `listByDevice`, `findById` |
+| `DevicesRepository` | `insert`, `findByDeviceId`, `updateTokenHash`, `touch` |
+
+## Auth (PR-2C)
+
+The auth module issues a per-device bearer token after a one-time
+PIN pairing. Every endpoint other than `GET /health`,
+`POST /api/auth/pair`, and `POST /api/auth/refresh` requires a
+valid `Authorization: Bearer <jwt>` header.
+
+### Endpoints
+
+```
+POST /api/auth/pair
+  Body:    { pin: "0000", device_name: "iPad de Seba" }
+  201 OK:  { token: "<jwt>", expires_at: "<iso>", device_id: "<uuid>" }
+  401:     { error: { code: "BAD_PIN" | "PIN_EXPIRED", message } }
+
+POST /api/auth/refresh
+  Body:    { token: "<old-jwt>" }
+  201 OK:  { token: "<new-jwt>", expires_at: "<iso>", device_id: "<uuid>" }
+  401:     { error: { code: "TOKEN_INVALID" | "TOKEN_EXPIRED", message } }
+
+GET  /api/me          (sample protected route)
+  Headers: Authorization: Bearer <jwt>
+  200 OK:  { device_id: "<uuid>", device_name: "iPad de Seba" }
+  401:     { error: { code: "UNAUTHORIZED" | "TOKEN_INVALID" | "TOKEN_EXPIRED", message } }
+```
+
+### Flow
+
+1. The NAS admin UI shows a PIN (env: `NAS_PAIR_PIN`, default
+   `0000`). The PIN is treated as expired when
+   `NAS_PIN_TTL_DAYS <= 0`.
+2. The device POSTs the PIN to `/api/auth/pair`. The server mints
+   a JWT (HS256, default 24h TTL, env: `NAS_JWT_TTL_HOURS`) with
+   claims `{ sub: device_id, jti: random(16 bytes hex) }` and
+   inserts a row into `devices` storing the SHA-256 digest of the
+   token in `token_hash`. The raw JWT is never persisted.
+3. Subsequent calls pass `Authorization: Bearer <jwt>`. The
+   `JwtAuthGuard` reads the header, calls
+   `AuthService.resolveBearer`, which verifies the signature,
+   loads the device row, recomputes SHA-256(token), and compares
+   it against the stored hash. A mismatch is treated as
+   `TOKEN_INVALID` (revoked).
+4. `/api/auth/refresh` accepts a valid token, rotates the stored
+   hash atomically, and returns a fresh JWT. The old token
+   immediately stops authenticating because its SHA-256 no longer
+   matches the stored hash.
+5. `last_seen_at` is updated asynchronously on every successful
+   authentication (the request does not block on this write).
+
+### Why SHA-256 instead of bcrypt for the token hash
+
+The `token_hash` column stores the SHA-256 hex digest of the raw
+JWT — not bcrypt — for one specific reason: bcrypt silently
+truncates input to 72 bytes. Two JWTs minted for the same device
+in the same second only differ in their `jti` claim, which sits
+past the 72-byte mark in the payload. bcrypt would map them to
+the same digest and `/api/auth/refresh` would falsely accept the
+old token after rotation. SHA-256 has no length limit and the
+JWT already carries 256+ bits of entropy from its random `jti`,
+so it is safe to store at rest.
