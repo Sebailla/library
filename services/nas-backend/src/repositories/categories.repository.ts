@@ -52,6 +52,12 @@ export interface CategoriesRepository {
   findByPath(path: string): Promise<Category | null>;
   listChildren(parentId: number): Promise<Category[]>;
   /**
+   * Return the categories attached to a given book via the
+   * ``book_categories`` bridge. Ordered by category path ASC so
+   * the response is stable across calls.
+   */
+  listForBook(bookId: number): Promise<Category[]>;
+  /**
    * Recursively expand the tree rooted at ``rootPath`` and return
    * every category in the sub-tree (root included). Uses a
    * ``WITH RECURSIVE`` CTE so it scales linearly with the sub-tree
@@ -97,6 +103,18 @@ export class PgCategoriesRepository implements CategoriesRepository {
     const res = await this.pool.query<CategoryRow>(
       `SELECT ${COLUMNS} FROM categories WHERE parent_id = $1 ORDER BY path ASC`,
       [parentId],
+    );
+    return res.rows.map(rowToCategory);
+  }
+
+  async listForBook(bookId: number): Promise<Category[]> {
+    const res = await this.pool.query<CategoryRow>(
+      `SELECT c.id, c.path, c.name_es, c.name_en, c.parent_id, c.depth, c.created_at
+       FROM categories c
+       JOIN book_categories bc ON bc.category_id = c.id
+       WHERE bc.book_id = $1
+       ORDER BY c.path ASC`,
+      [bookId],
     );
     return res.rows.map(rowToCategory);
   }

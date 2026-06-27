@@ -44,14 +44,59 @@ function restoreEnv(): void {
 /* ---------- in-memory repositories ---------- */
 
 class InMemoryDevicesRepository {
-  async insert(): Promise<{ deviceId: string; pairedAt: Date }> {
-    return { deviceId: 'dev', pairedAt: new Date() };
+  private rows: Array<{
+    deviceId: string;
+    deviceName: string | null;
+    tokenHash: string;
+    pairedAt: Date;
+    lastSeenAt: Date | null;
+    ipAddress: string | null;
+  }> = [];
+  private currentTokenHash = '';
+
+  async insert(row: {
+    deviceId: string;
+    deviceName: string | null;
+    tokenHash: string;
+    ipAddress: string | null;
+  }): Promise<{ deviceId: string; pairedAt: Date }> {
+    const pairedAt = new Date();
+    this.rows.push({
+      deviceId: row.deviceId,
+      deviceName: row.deviceName,
+      tokenHash: row.tokenHash,
+      ipAddress: row.ipAddress,
+      pairedAt,
+      lastSeenAt: null,
+    });
+    this.currentTokenHash = row.tokenHash;
+    return { deviceId: row.deviceId, pairedAt };
   }
-  async findByDeviceId(): Promise<null> {
-    return null;
+
+  async findByDeviceId(deviceId: string): Promise<{
+    deviceId: string;
+    deviceName: string | null;
+    tokenHash: string;
+    pairedAt: Date;
+    lastSeenAt: Date | null;
+    ipAddress: string | null;
+  } | null> {
+    return this.rows.find((r) => r.deviceId === deviceId) ?? null;
   }
-  async updateTokenHash(): Promise<void> {}
-  async touch(): Promise<void> {}
+
+  async updateTokenHash(deviceId: string, tokenHash: string): Promise<void> {
+    const row = this.rows.find((r) => r.deviceId === deviceId);
+    if (row) {
+      row.tokenHash = tokenHash;
+      this.currentTokenHash = tokenHash;
+    }
+  }
+
+  async touch(deviceId: string): Promise<void> {
+    const row = this.rows.find((r) => r.deviceId === deviceId);
+    if (row) row.lastSeenAt = new Date();
+  }
+
   async close(): Promise<void> {}
 }
 

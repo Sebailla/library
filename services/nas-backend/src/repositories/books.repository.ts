@@ -44,12 +44,20 @@ export interface PaginationOpts {
   offset?: number;
 }
 
+/** Filters supported by {@link BooksRepository.list} and {@link BooksRepository.count}. */
+export interface ListFilters {
+  authorId?: number;
+  format?: string;
+  language?: string;
+}
+
 /** Repository contract for the ``books`` table. */
 export interface BooksRepository {
   insert(book: NewBook): Promise<Book>;
   findById(id: number): Promise<Book | null>;
   listByAuthor(authorId: number, opts?: PaginationOpts): Promise<Book[]>;
-  list(opts?: PaginationOpts): Promise<Book[]>;
+  list(opts?: PaginationOpts & ListFilters): Promise<Book[]>;
+  count(filters?: ListFilters): Promise<number>;
   search(query: string, opts?: PaginationOpts): Promise<Book[]>;
   close(): Promise<void>;
 }
@@ -151,12 +159,51 @@ export class PgBooksRepository implements BooksRepository {
     );
   }
 
-  async list(opts: PaginationOpts = {}): Promise<Book[]> {
+  async list(opts: PaginationOpts & ListFilters = {}): Promise<Book[]> {
+    const { authorId, format, language, ...pagination } = opts;
+    const where: string[] = [];
+    const params: unknown[] = [];
+    if (authorId !== undefined) {
+      params.push(authorId);
+      where.push(`author_id = $${params.length}`);
+    }
+    if (format !== undefined) {
+      params.push(format);
+      where.push(`format = $${params.length}`);
+    }
+    if (language !== undefined) {
+      params.push(language);
+      where.push(`language = $${params.length}`);
+    }
+    const whereClause = where.length ? `WHERE ${where.join(' AND ')}` : '';
     return this.runList(
-      `SELECT ${COLUMNS} FROM books ORDER BY id ASC`,
-      [],
-      opts,
+      `SELECT ${COLUMNS} FROM books ${whereClause} ORDER BY id ASC`,
+      params,
+      pagination,
     );
+  }
+
+  async count(filters: ListFilters = {}): Promise<number> {
+    const where: string[] = [];
+    const params: unknown[] = [];
+    if (filters.authorId !== undefined) {
+      params.push(filters.authorId);
+      where.push(`author_id = $${params.length}`);
+    }
+    if (filters.format !== undefined) {
+      params.push(filters.format);
+      where.push(`format = $${params.length}`);
+    }
+    if (filters.language !== undefined) {
+      params.push(filters.language);
+      where.push(`language = $${params.length}`);
+    }
+    const whereClause = where.length ? `WHERE ${where.join(' AND ')}` : '';
+    const res = await this.pool.query<{ count: string }>(
+      `SELECT COUNT(*)::int AS count FROM books ${whereClause}`,
+      params,
+    );
+    return Number(res.rows[0].count);
   }
 
   async search(
