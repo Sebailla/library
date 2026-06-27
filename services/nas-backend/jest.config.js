@@ -10,11 +10,5 @@ module.exports = {
     '^@app/(.*)$': '<rootDir>/src/$1',
   },
   testEnvironment: 'node',
-  // Use a separate tsconfig for tests to avoid pulling e2e specs into the
-  // production build.
-  globals: {
-    'ts-jest': {
-      tsconfig: 'tsconfig.json',
-    },
-  },
+  forceExit: true,
 };

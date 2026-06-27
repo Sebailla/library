@@ -15,82 +15,79 @@ import { AppModule } from '../src/app.module';
  *
  * Per the spec, the 503 path includes per-check status so a failing
  * dependency is identifiable from the response alone.
+ *
+ * Both ping providers are overridden in every test so the suite does
+ * not need real Postgres + Redis instances to run. Production wiring
+ * is exercised by ``docker compose up`` and the README's curl snippet.
  */
 describe('GET /health', () => {
-  let app: INestApplication;
+  const okPing = async (): Promise<void> => undefined;
+  const failingPing = async (): Promise<void> => {
+    throw new Error('simulated outage');
+  };
 
-  beforeEach(async () => {
-    const moduleRef: TestingModule = await Test.createTestingModule({
-      imports: [AppModule],
-    }).compile();
-    app = moduleRef.createNestApplication();
-    await app.init();
-  });
-
-  afterEach(async () => {
-    await app.close();
-  });
-
-  it('returns 200 when DB + Redis are healthy', async () => {
-    const res = await request(app.getHttpServer()).get('/health').expect(200);
-    expect(res.body).toMatchObject({
-      status: 'ok',
-      version: expect.any(String),
-    });
-    expect(typeof res.body.timestamp).toBe('string');
-    // ISO-8601 sanity check on the timestamp.
-    expect(() => new Date(res.body.timestamp).toISOString()).not.toThrow();
-  });
-
-  it('returns 503 when Postgres is unreachable', async () => {
-    // The provider that fails the DB ping is wired by AppModule; we
-    // override it here with a fake that throws to simulate a down DB.
+  async function buildApp(
+    dbOverride: () => Promise<void> = okPing,
+    redisOverride: () => Promise<void> = okPing,
+  ): Promise<INestApplication> {
     const moduleRef: TestingModule = await Test.createTestingModule({
       imports: [AppModule],
     })
       .overrideProvider('DATABASE_PING')
-      .useValue(async () => {
-        throw new Error('connection refused');
-      })
+      .useValue(dbOverride)
+      .overrideProvider('REDIS_PING')
+      .useValue(redisOverride)
       .compile();
-    const failingApp = moduleRef.createNestApplication();
-    await failingApp.init();
+    const testApp = moduleRef.createNestApplication();
+    await testApp.init();
+    return testApp;
+  }
 
-    const res = await request(failingApp.getHttpServer())
-      .get('/health')
-      .expect(503);
+  it('returns 200 when DB + Redis are healthy', async () => {
+    const app = await buildApp();
+    try {
+      const res = await request(app.getHttpServer()).get('/health').expect(200);
+      expect(res.body).toMatchObject({
+        status: 'ok',
+        version: expect.any(String),
+      });
+      expect(typeof res.body.timestamp).toBe('string');
+      // ISO-8601 sanity check on the timestamp.
+      expect(() => new Date(res.body.timestamp).toISOString()).not.toThrow();
+    } finally {
+      await app.close();
+    }
+  });
 
-    expect(res.body).toMatchObject({
-      status: 'error',
-      version: expect.any(String),
-    });
-    expect(res.body.checks.db).toMatchObject({ ok: false });
-
-    await failingApp.close();
+  it('returns 503 when Postgres is unreachable', async () => {
+    const app = await buildApp(failingPing);
+    try {
+      const res = await request(app.getHttpServer()).get('/health').expect(503);
+      expect(res.body).toMatchObject({
+        status: 'error',
+        version: expect.any(String),
+      });
+      expect(res.body.checks.db).toMatchObject({ ok: false });
+      // Redis still healthy in this scenario.
+      expect(res.body.checks.redis).toMatchObject({ ok: true });
+    } finally {
+      await app.close();
+    }
   });
 
   it('returns 503 when Redis is unreachable', async () => {
-    const moduleRef: TestingModule = await Test.createTestingModule({
-      imports: [AppModule],
-    })
-      .overrideProvider('REDIS_PING')
-      .useValue(async () => {
-        throw new Error('redis unreachable');
-      })
-      .compile();
-    const failingApp = moduleRef.createNestApplication();
-    await failingApp.init();
-
-    const res = await request(failingApp.getHttpServer())
-      .get('/health')
-      .expect(503);
-
-    expect(res.body).toMatchObject({
-      status: 'error',
-      version: expect.any(String),
-    });
-    expect(res.body.checks.redis).toMatchObject({ ok: false });
-
-    await failingApp.close();
+    const app = await buildApp(okPing, failingPing);
+    try {
+      const res = await request(app.getHttpServer()).get('/health').expect(503);
+      expect(res.body).toMatchObject({
+        status: 'error',
+        version: expect.any(String),
+      });
+      expect(res.body.checks.redis).toMatchObject({ ok: false });
+      // DB still healthy in this scenario.
+      expect(res.body.checks.db).toMatchObject({ ok: true });
+    } finally {
+      await app.close();
+    }
   });
 });
