@@ -9,8 +9,9 @@ predictable shape.
 
 The full extractor behaviour is intentionally NOT implemented in this
 commit — only the dispatching surface area (help, version, stub JSON
-errors) is in scope. See ``openspec/changes/alejandria-v2/tasks.md``
-Phase 1 tasks 1.4 onward for the real extractors.
+errors) is in scope. Per-format wrappers land in subsequent commits
+following strict TDD: see ``openspec/changes/alejandria-v2/tasks.md``
+Phase 1 tasks 1.3 onward for the per-format rollout.
 """
 from __future__ import annotations
 
