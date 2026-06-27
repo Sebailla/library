@@ -112,29 +112,29 @@ def minimal_epub(tmp_path: Path) -> Path:
         )
         zf.writestr(
             "META-INF/container.xml",
-            """<?xml version='1.0' encoding='utf-8'?>
-<container version='1.0' xmlns='urn:oasis:names:tc:opendocument:xmlns:container'>
+            """<?xml version="1.0" encoding="utf-8"?>
+<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
   <rootfiles>
-    <rootfile full-path='OEBPS/content.opf' media-type='application/oebps-package+xml'/>
+    <rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>
   </rootfiles>
 </container>
 """,
         )
         zf.writestr(
             "OEBPS/content.opf",
-            """<?xml version='1.0' encoding='utf-8'?>
-<package xmlns='http://www.idpf.org/2007/opf' unique-identifier='bookid' version='2.0'>
-  <metadata xmlns:dc='http://purl.org/dc/elements/1.1/'>
+            """<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" unique-identifier="bookid" version="2.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
     <dc:title>Sidecar EPUB Fixture</dc:title>
     <dc:creator>Sidecar Test Suite</dc:creator>
-    <dc:identifier id='bookid'>urn:uuid:00000000-0000-0000-0000-000000000001</dc:identifier>
+    <dc:identifier id="bookid">urn:uuid:00000000-0000-0000-0000-000000000001</dc:identifier>
     <dc:language>en</dc:language>
   </metadata>
   <manifest>
-    <item id='ch1' href='ch1.xhtml' media-type='application/xhtml+xml'/>
+    <item id="ch1" href="ch1.xhtml" media-type="application/xhtml+xml"/>
   </manifest>
   <spine>
-    <itemref idref='ch1'/>
+    <itemref idref="ch1"/>
   </spine>
 </package>
 """,
