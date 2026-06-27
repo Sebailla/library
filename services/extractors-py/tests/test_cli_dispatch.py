@@ -23,8 +23,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import pytest
-
 
 def test_dispatch_registry_maps_epub_to_extract_epub() -> None:
     """``.epub`` must route to ``extractors.epub.extract_epub``."""
@@ -62,7 +60,7 @@ def test_dispatch_registry_maps_docx_to_extract_docx() -> None:
 
 def test_cli_extract_routes_epub_through_dispatcher(minimal_epub: Path) -> None:
     """End-to-end: a real EPUB fed to the CLI must surface the EPUB wrapper output."""
-    from .conftest import run_cli  # type: ignore[import-not-found]
+    from .conftest import run_cli
 
     result = run_cli("extract", str(minimal_epub))
 
@@ -81,7 +79,7 @@ def test_cli_extract_routes_epub_through_dispatcher(minimal_epub: Path) -> None:
 
 def test_cli_extract_routes_docx_through_dispatcher(minimal_docx: Path) -> None:
     """End-to-end: a real DOCX fed to the CLI must surface the DOCX wrapper output."""
-    from .conftest import run_cli  # type: ignore[import-not-found]
+    from .conftest import run_cli
 
     result = run_cli("extract", str(minimal_docx))
 
@@ -97,7 +95,7 @@ def test_cli_extract_routes_docx_through_dispatcher(minimal_docx: Path) -> None:
 
 def test_cli_extract_unknown_format_returns_unknown_envelope(tmp_path: Path) -> None:
     """An extension the sidecar doesn't know must return UNKNOWN_FORMAT (exit 3)."""
-    from .conftest import run_cli  # type: ignore[import-not-found]
+    from .conftest import run_cli
 
     bogus = tmp_path / "mystery.xyz"
     bogus.write_bytes(b"placeholder")
