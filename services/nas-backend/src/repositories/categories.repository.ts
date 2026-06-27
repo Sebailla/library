@@ -51,6 +51,8 @@ export interface CategoriesRepository {
   insert(category: NewCategory): Promise<Category>;
   findByPath(path: string): Promise<Category | null>;
   listChildren(parentId: number): Promise<Category[]>;
+  /** Return every root category (depth=0, parentId=NULL) ordered by path. */
+  listRoots(): Promise<Category[]>;
   /**
    * Return the categories attached to a given book via the
    * ``book_categories`` bridge. Ordered by category path ASC so
@@ -103,6 +105,13 @@ export class PgCategoriesRepository implements CategoriesRepository {
     const res = await this.pool.query<CategoryRow>(
       `SELECT ${COLUMNS} FROM categories WHERE parent_id = $1 ORDER BY path ASC`,
       [parentId],
+    );
+    return res.rows.map(rowToCategory);
+  }
+
+  async listRoots(): Promise<Category[]> {
+    const res = await this.pool.query<CategoryRow>(
+      `SELECT ${COLUMNS} FROM categories WHERE parent_id IS NULL ORDER BY path ASC`,
     );
     return res.rows.map(rowToCategory);
   }

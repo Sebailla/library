@@ -11,6 +11,7 @@ import {
 import {
   CATEGORIES_REPOSITORY,
   CategoriesRepository,
+  Category,
 } from './categories.repository';
 import {
   SAGAS_REPOSITORY,
