@@ -15,7 +15,8 @@ import { loadMigrations, runMigrations } from '../scripts/migrate';
  * without requiring a per-test database.
  *
  * PR-2B ships migrations 001-009 incrementally (one slice per
- * commit). Each slice adds its own migration files and the runner
+ * commit); PR-2C extends the chain with migration 010 (devices
+ * table). Each slice adds its own migration files and the runner
  * tests assert the slice's expected outcome. Earlier slices are
  * still verified because the runner re-applies them on every run.
  */
@@ -45,7 +46,7 @@ skipIfNoDb('migration runner', () => {
   it('lists migration files in lexicographic order', async () => {
     const files = await loadMigrations(path.join(repoRoot, 'migrations'));
     const names = files.map((f) => f.name);
-    // All nine migrations shipped in PR-2B must be present.
+    // All ten migrations shipped in PR-2B + PR-2C must be present.
     expect(names).toEqual(
       expect.arrayContaining([
         '001_extensions.sql',
@@ -57,6 +58,7 @@ skipIfNoDb('migration runner', () => {
         '007_downloads.sql',
         '008_pgroonga_indexes.sql',
         '009_seed_categories.sql',
+        '010_devices.sql',
       ]),
     );
     // Order must be lexicographic (which equals numeric for fixed-
@@ -81,6 +83,7 @@ skipIfNoDb('migration runner', () => {
         '007_downloads.sql',
         '008_pgroonga_indexes.sql',
         '009_seed_categories.sql',
+        '010_devices.sql',
       ]),
     );
 
@@ -175,6 +178,23 @@ skipIfNoDb('migration runner', () => {
       expect(pgIdx.rows.map((r) => r.indexname)).toEqual([
         'books_excerpt_pgroonga_idx',
         'books_title_pgroonga_idx',
+      ]);
+
+      // PR-2C: migration 010 introduces the ``devices`` table for
+      // PIN-pairing auth. The columns must be in the documented
+      // order so callers (and the ``devices.repository``) can rely
+      // on positional reads via ``pg``.
+      const deviceCols = await pool.query<{ column_name: string }>(
+        "SELECT column_name FROM information_schema.columns WHERE table_name = 'devices' ORDER BY ordinal_position",
+      );
+      expect(deviceCols.rows.map((r) => r.column_name)).toEqual([
+        'id',
+        'device_id',
+        'device_name',
+        'token_hash',
+        'paired_at',
+        'last_seen_at',
+        'ip_address',
       ]);
 
       // Migration 009 seeds a small bilingual taxonomy. The
