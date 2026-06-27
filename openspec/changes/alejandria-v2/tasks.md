@@ -31,8 +31,8 @@ Chain strategy: stacked-to-main
 
 ## Phase 2: NAS backend (PR2)
 
-- [ ] 2.1 RED test `services/nas-backend/test/health.e2e-spec.ts` asserts `GET /health` returns `{status:"ok"}`.
-- [ ] 2.2 GREEN scaffold `services/nas-backend/` with `docker-compose.yml` for Postgres 16 + pgroonga + Redis.
+- [x] 2.1 RED test `services/nas-backend/test/health.e2e-spec.ts` asserts `GET /health` returns `{status:"ok"}`. (PR-2A — also covers DB-down + Redis-down scenarios)
+- [x] 2.2 GREEN scaffold `services/nas-backend/` with `docker-compose.yml` for Postgres 16 + pgroonga + Redis. (PR-2A — bootstrap only; modules ship in PR-2B..PR-2F)
 - [ ] 2.3 GREEN add NestJS modules `auth`, `books`, `search`, `downloads`, `workers`, `discovery`, `database` with MVC layers.
 - [ ] 2.4 GREEN write `migrations/0001_init.sql` with `BIGSERIAL`, `library_id`, pgroonga indexes, FTS5 trigger ports.
 - [ ] 2.5 RED test `test/workers.e2e-spec.ts`: file appears → BullMQ job → row in `books`.
