@@ -22,6 +22,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 
 def test_dispatch_registry_maps_epub_to_extract_epub() -> None:
     """``.epub`` must route to ``extractors.epub.extract_epub``."""
@@ -333,3 +335,160 @@ def test_cli_extract_unknown_format_returns_unknown_envelope(tmp_path: Path) -> 
     payload = json.loads(result.stdout)
     assert "error" in payload
     assert payload["error"]["code"] == "UNKNOWN_FORMAT"
+
+
+# ---------------------------------------------------------------------------
+# Comprehensive parametrized dispatch contract matrix
+# ---------------------------------------------------------------------------
+#
+# The individual ``test_cli_extract_routes_*`` tests above pin the
+# routing contract one extension at a time so a regression on a
+# single format produces a precise failure message. The parametrized
+# matrix below is the *at-a-glance* view: it makes "the dispatcher
+# routes every supported extension correctly" a single pytest
+# invocation rather than 12 separate reads. If you add a new wrapper,
+# add a row to :data:`EXTENSION_DISPATCH_MATRIX` and a matching
+# fixture in ``conftest.py`` — pytest will pick up the new case
+# automatically.
+#
+# Note: the sidecar dispatches on the file's *suffix*, not on the
+# wrapper's fixture filename. To exercise every row we copy each
+# fixture to a path with the canonical extension before invoking
+# the CLI.
+
+# (extension, fixture_name, expected envelope ``format`` field,
+# expected envelope ``extractor_name`` field)
+EXTENSION_DISPATCH_MATRIX: list[tuple[str, str, str, str]] = [
+    (".pdf", "minimal_pdf", "pdf", "pdf"),
+    (".epub", "minimal_epub", "epub", "epub"),
+    (".docx", "minimal_docx", "docx", "docx"),
+    (".png", "minimal_png", "image", "image"),
+    (".jpg", "minimal_jpeg", "image", "image"),
+    (".cbz", "minimal_cbz", "cbz", "cbz"),
+    (".mp3", "minimal_audio", "audio", "audio"),
+    (".wav", "minimal_audio", "audio", "audio"),
+    (".mp4", "minimal_video", "video", "video"),
+    (".chm", "minimal_chm", "chm", "chm"),
+    (".djvu", "minimal_djvu", "djvu", "djvu"),
+    (".djv", "minimal_djvu", "djvu", "djvu"),
+]
+
+
+@pytest.mark.parametrize(
+    ("extension", "fixture_name", "expected_format", "expected_extractor"),
+    EXTENSION_DISPATCH_MATRIX,
+    ids=[row[0] for row in EXTENSION_DISPATCH_MATRIX],
+)
+def test_dispatch_contract_matrix(
+    extension: str,
+    fixture_name: str,
+    expected_format: str,
+    expected_extractor: str,
+    request: pytest.FixtureRequest,
+) -> None:
+    """The CLI must route every supported extension to the right wrapper.
+
+    This is the at-a-glance contract test for "the dispatcher knows
+    how to extract every format we ship". A failure here points at
+    the specific extension, the expected wrapper, and the actual
+    routing — enough to triage in one read.
+    """
+    from .conftest import run_cli
+
+    fixture_path: Path = request.getfixturevalue(fixture_name)
+
+    # Copy the fixture to a path with the canonical extension so the
+    # dispatcher's suffix-based routing picks up the row under test.
+    # The wrapper only inspects the suffix, not the file contents,
+    # so the copy can share bytes with the original fixture.
+    fixture_for_dispatch = fixture_path.with_suffix(extension)
+    fixture_for_dispatch.write_bytes(fixture_path.read_bytes())
+
+    # Audio is conditionally skipped when the wrapper is not
+    # importable in the test environment — the MVP gracefully falls
+    # back when ``mutagen`` is missing; see
+    # ``dispatch._register_default_extractors``.
+    if expected_extractor == "audio":
+        import alejandria_sidecar.extractors.dispatch as dispatch_module
+
+        # Trigger lazy registry build so the mapping reflects what's
+        # actually importable here.
+        dispatch_module.dispatch_extract(fixture_for_dispatch)
+        if extension.lstrip(".") not in {
+            ext.lstrip(".") for ext in dispatch_module._EXTRACTORS
+        }:
+            pytest.skip(f"audio wrapper not importable; skipping {extension}")
+
+    result = run_cli("extract", str(fixture_for_dispatch))
+
+    assert result.returncode == 0, (
+        f"extract must exit 0 for extension {extension!r}; got {result.returncode}\n"
+        f"stderr:\n{result.stderr}"
+    )
+    payload = json.loads(result.stdout)
+    assert payload["schema_version"] == 1, (
+        f"envelope must carry schema_version=1 for {extension!r}; got {payload!r}"
+    )
+    assert payload["format"] == expected_format, (
+        f"{extension!r} must dispatch to format {expected_format!r}; "
+        f"got {payload['format']!r}"
+    )
+    assert payload["extractor_name"] == expected_extractor, (
+        f"{extension!r} must dispatch to extractor {expected_extractor!r}; "
+        f"got {payload['extractor_name']!r}"
+    )
+
+
+def test_dispatch_matrix_covers_all_registered_wrappers() -> None:
+    """The parametrized matrix must exercise every registered wrapper.
+
+    Structural guard against silent regressions: the matrix pins the
+    *wrapper* identity, not the extension enumeration (image/video
+    families ship multiple extension aliases that all dispatch to the
+    same wrapper). So we assert one row per distinct wrapper — if a
+    new wrapper class is registered but the matrix doesn't list it,
+    this test fails.
+
+    The audio wrapper is conditionally checked: when ``mutagen`` is
+    missing the wrapper is not registered and we skip the assertion.
+    """
+    from pathlib import Path as _Path
+
+    from alejandria_sidecar.extractors.dispatch import dispatch_extract
+
+    # Trigger lazy registry build.
+    dispatch_extract(_Path("trigger.ext"))
+
+    import alejandria_sidecar.extractors.dispatch as dispatch_module
+
+    registered_exts = {ext.lower() for ext in dispatch_module._EXTRACTORS}
+    matrix_exts = {row[0].lower() for row in EXTENSION_DISPATCH_MATRIX}
+
+    # Build the set of distinct wrappers referenced by the registered
+    # extensions: for each registered ext, look up the wrapper callable
+    # and group by id() — extensions pointing at the same wrapper are
+    # the same contract from the consumer's point of view.
+    registered_wrappers = {id(ext): id(w) for ext, w in dispatch_module._EXTRACTORS.items()}
+    matrix_wrappers = {
+        id(dispatch_module._EXTRACTORS[ext])
+        for ext in matrix_exts
+        if ext in dispatch_module._EXTRACTORS
+    }
+
+    # The audio wrapper is optional and may not register in CI without
+    # ``mutagen``. We only enforce the structural guard for it when it
+    # is registered AND the matrix claims to exercise it.
+    if ".mp3" in registered_exts and "audio" not in {
+        row[3] for row in EXTENSION_DISPATCH_MATRIX
+    }:
+        pytest.fail(
+            "audio wrapper is registered but EXTENSION_DISPATCH_MATRIX has no "
+            "'audio' extractor row. Add a row using minimal_audio."
+        )
+
+    missing_wrappers = set(registered_wrappers.values()) - matrix_wrappers
+    assert not missing_wrappers, (
+        f"registered wrappers without a parametrized dispatch test: "
+        f"{sorted(missing_wrappers)}. Add a row to EXTENSION_DISPATCH_MATRIX "
+        f"in tests/test_cli_dispatch.py."
+    )
