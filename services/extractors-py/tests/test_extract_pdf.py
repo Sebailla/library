@@ -52,7 +52,7 @@ def test_extract_pdf_missing_file_returns_file_unreadable(tmp_path: Path) -> Non
 
 def test_cli_extract_dispatches_pdf(minimal_pdf: Path) -> None:
     """The CLI's ``extract`` subcommand must dispatch .pdf to the PDF wrapper."""
-    from conftest import run_cli  # type: ignore[import-not-found]
+    from .conftest import run_cli  # type: ignore[import-not-found]
 
     result = run_cli("extract", str(minimal_pdf))
 
