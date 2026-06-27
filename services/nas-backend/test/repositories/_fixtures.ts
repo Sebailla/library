@@ -1,0 +1,75 @@
+import { Pool, PoolClient } from 'pg';
+import { runMigrations } from '../../scripts/migrate';
+
+/**
+ * Test fixtures for the repository test suites.
+ *
+ * The repositories are tested against a real Postgres + pgroonga
+ * instance. Each test suite resets the public schema via the
+ * migration runner so prior runs cannot leak state.
+ *
+ * Connection details come from ``DATABASE_URL``; tests skip when it
+ * is not set so the suite remains runnable in environments without
+ * a Postgres instance.
+ */
+
+export const DATABASE_URL =
+  process.env.DATABASE_URL ?? 'postgresql:///alejandria';
+
+const repoRootFor = (testDir: string): string => {
+  // ``test/repositories/*.spec.ts`` lives two levels under the
+  // service root; ``test/migrations.*.spec.ts`` lives one level.
+  const segments = testDir.split('/');
+  return segments.slice(0, segments.length - 2).join('/') || testDir;
+};
+
+export async function resetAndMigrate(testDir: string): Promise<void> {
+  const pool = new Pool({ connectionString: DATABASE_URL });
+  try {
+    await pool.query('DROP SCHEMA IF EXISTS public CASCADE');
+    await pool.query('CREATE SCHEMA public');
+  } finally {
+    await pool.end();
+  }
+  // Re-enable extensions after the schema wipe so subsequent
+  // migration 001 can CREATE EXTENSION IF NOT EXISTS them back into
+  // the fresh public schema.
+  await runMigrations({
+    connectionString: DATABASE_URL,
+    migrationsDir: `${repoRootFor(testDir)}/migrations`,
+  });
+}
+
+export async function withClient<T>(
+  fn: (client: PoolClient) => Promise<T>,
+): Promise<T> {
+  const pool = new Pool({ connectionString: DATABASE_URL });
+  try {
+    const client = await pool.connect();
+    try {
+      return await fn(client);
+    } finally {
+      client.release();
+    }
+  } finally {
+    await pool.end();
+  }
+}
+
+/**
+ * Insert a parent author row and return its id. The repositories
+ * tested here always operate against an existing author, so this is
+ * the most common fixture helper.
+ */
+export async function insertAuthor(
+  lastname: string,
+  firstname: string,
+): Promise<number> {
+  return withClient(async (client) => {
+    const res = await client.query<{ id: string }>(
+      'INSERT INTO authors (lastname, firstname) VALUES ($1, $2) RETURNING id',
+      [lastname, firstname],
+    );
+    return Number(res.rows[0].id);
+  });
+}
