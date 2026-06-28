@@ -1,0 +1,88 @@
+# docker-compose.yml — local NAS backend stack for alejandria-v2.
+#
+# Brings up Postgres 16 with pgroonga preinstalled, Redis 7 for BullMQ,
+# and the NestJS app. The app waits for both dependencies to report
+# healthy before starting, so the /health endpoint returns 200 once
+# ``docker compose up`` is silent for ~5s.
+#
+# Usage:
+#   docker compose up --build        # foreground
+#   docker compose up -d --build     # detached
+#   curl http://localhost:3000/health
+#
+# Volumes persist across ``docker compose down``; use ``down -v`` to wipe.
+
+services:
+  postgres:
+    # 4R review #43 — build the pg_cron overlay on top of the
+    # upstream pgroonga image so the nightly defrag job can be
+    # scheduled at ``CREATE EXTENSION`` time. To use the bare
+    # ``groonga/pgroonga:latest`` image instead, drop the
+    # ``build:`` stanza and uncomment the ``image:`` line below —
+    # migration 011 downgrades gracefully so the missing extension
+    # does not break ``npm run migrate``.
+    build:
+      context: .
+      dockerfile: Dockerfile.pg
+    # image: groonga/pgroonga:latest
+    container_name: alejandria-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: alejandria
+      POSTGRES_PASSWORD: alejandria
+      POSTGRES_DB: alejandria
+    ports:
+      - "5432:5432"
+    volumes:
+      - alejandria-pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U alejandria -d alejandria"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: alejandria-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - alejandria-redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  nas-backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: alejandria-nas-backend
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      DATABASE_URL: postgresql://alejandria:alejandria@postgres:5432/alejandria
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      # Security: the app refuses to boot without these (4R review
+      # #32). Override with real random values for production:
+      #   openssl rand -base64 48          # for NAS_JWT_SECRET (>= 32 bytes)
+      #   openssl rand -base64 16          # for NAS_PAIR_PIN (>= 8 chars)
+      NAS_JWT_SECRET: change-me-in-prod-NAS_JWT_SECRET-32-bytes-min
+      NAS_PAIR_PIN: change-me-in-prod-NAS_PAIR_PIN-8-chars-min
+      NAS_PIN_TTL_DAYS: "30"
+      NAS_JWT_TTL_HOURS: "24"
+    ports:
+      - "3000:3000"
+
+volumes:
+  alejandria-pg-data:
+  alejandria-redis-data:
