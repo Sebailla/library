@@ -104,7 +104,7 @@ async function buildApp(opts: {
   setEnv({
     NAS_PAIR_PIN: opts.pin ?? '0000',
     NAS_PIN_TTL_DAYS: String(opts.ttlDays ?? '30'),
-    NAS_JWT_SECRET: opts.jwtSecret ?? 'test-secret-do-not-use-in-prod',
+    NAS_JWT_SECRET: opts.jwtSecret ?? 'test-secret-do-not-use-in-prod-must-be-32+bytes',
     NAS_JWT_TTL_HOURS: String(opts.jwtTtlHours ?? '24'),
   });
   const devices = new InMemoryDevicesRepository();
@@ -235,7 +235,7 @@ describe('POST /api/auth/refresh', () => {
   });
 
   it('returns 201 with a new token when given a valid Bearer', async () => {
-    const secret = 'test-secret-do-not-use-in-prod';
+    const secret = 'test-secret-do-not-use-in-prod-must-be-32+bytes';
     const { app } = await buildApp({ jwtSecret: secret });
     try {
       const pair = await request(app.getHttpServer())
@@ -333,14 +333,14 @@ describe('Auth module — boot-time security validation', () => {
   });
 
   it('refuses to start when NAS_JWT_SECRET is shorter than 32 bytes', async () => {
-    setEnv({
-      NAS_JWT_SECRET: 'too-short',
-      NODE_ENV: 'production',
-    });
+    process.env.NODE_ENV = 'production';
     let threw = false;
     let message = '';
     try {
-      const { app } = await buildApp();
+      // Explicit short secret (9 bytes) — the helper passes this
+      // straight to setEnv so the test cannot be accidentally
+      // masked by a long default.
+      const { app } = await buildApp({ jwtSecret: 'too-short' });
       await app.close();
     } catch (err) {
       threw = true;

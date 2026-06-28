@@ -15,6 +15,36 @@ import { PG_POOL } from '../database/pg.service';
 import { Pool } from 'pg';
 
 /**
+ * Resolve and validate the HMAC secret used to sign issued JWTs.
+ *
+ * Boot-time security guard (#32, 4R review): the module MUST
+ * refuse to start when ``NAS_JWT_SECRET`` is unset or shorter
+ * than 32 bytes (256 bits — the HS256 security floor). Falling
+ * back to a public literal like ``"dev-secret-change-me"`` would
+ * let any attacker who has read the source forge a valid bearer
+ * token, which is the exact exposure this validator closes.
+ *
+ * The check fires at module-compile time (NestJS evaluates the
+ * factory when the dependency graph is built) so a misconfigured
+ * production deploy fails fast with a clear error message
+ * instead of silently booting with weak credentials.
+ */
+function resolveJwtSecret(): string {
+  const secret = process.env.NAS_JWT_SECRET;
+  if (!secret || secret.length === 0) {
+    throw new Error(
+      'NAS_JWT_SECRET is required. Set it to a random string of at least 32 bytes (256 bits) before starting alejandria-nas-backend.',
+    );
+  }
+  if (Buffer.byteLength(secret, 'utf8') < 32) {
+    throw new Error(
+      `NAS_JWT_SECRET must be at least 32 bytes (256 bits) for HS256. Got ${Buffer.byteLength(secret, 'utf8')} bytes.`,
+    );
+  }
+  return secret;
+}
+
+/**
  * Auth module — PIN pairing, JWT issuance, device persistence,
  * Bearer-token guard.
  *
@@ -34,7 +64,7 @@ import { Pool } from 'pg';
     PassportModule,
     JwtModule.registerAsync({
       useFactory: () => ({
-        secret: process.env.NAS_JWT_SECRET ?? 'dev-secret-change-me',
+        secret: resolveJwtSecret(),
         signOptions: { algorithm: 'HS256' },
       }),
     }),
