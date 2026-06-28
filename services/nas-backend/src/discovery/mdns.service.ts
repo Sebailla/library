@@ -32,8 +32,22 @@ export const MDNS_SERVICE_HOST = 'NAS_MDNS_SERVICE_HOST';
 /**
  * Bonjour wrapper shape — abstracted so the test suite can inject a
  * fake without booting a real mDNS responder on the runner.
+ *
+ * The wrapper extends the {@link BonjourLikeEventEmitter} subset
+ * so the service can attach an ``'error'`` listener (4R review
+ * #36). The real ``Bonjour`` instance from the ``bonjour`` npm
+ * package is an ``EventEmitter``; the wrapper preserves the same
+ * ``on``/``off``/``emit`` surface (delegating to the underlying
+ * instance) so the resilience contract holds in production AND
+ * in tests.
  */
-export interface BonjourLike {
+export interface BonjourLikeEventEmitter {
+  on(event: 'error', listener: (err: Error) => void): unknown;
+  off(event: 'error', listener: (err: Error) => void): unknown;
+  removeAllListeners(event?: string): unknown;
+}
+
+export interface BonjourLike extends BonjourLikeEventEmitter {
   publish(opts: {
     name: string;
     type: string;
@@ -51,10 +65,25 @@ export type BonjourFactory = () => BonjourLike;
  *
  * Production wiring uses this; e2e + unit tests inject a stub via
  * the ``BONJOUR`` token so no socket is opened on the runner.
+ *
+ * The wrapper exposes the underlying ``EventEmitter`` surface
+ * (``on``/``off``/``removeAllListeners``) by delegating to the
+ * raw bonjour instance. 4R review #36: callers attach an
+ * ``'error'`` listener to swallow async UDP bind failures (EADDRINUSE,
+ * EACCES when Avahi is missing) so the process does not crash.
  */
 export const defaultBonjourFactory: BonjourFactory = () => {
   const instance: Bonjour = bonjour();
-  return {
+  // The published ``Bonjour`` type is missing ``EventEmitter``
+  // methods in its d.ts; the underlying instance is in fact an
+  // EventEmitter (the npm package inherits from one). Cast to the
+  // structural shape we need for the error-listener delegation.
+  const emitter = instance as unknown as {
+    on(event: 'error', listener: (err: Error) => void): unknown;
+    off(event: 'error', listener: (err: Error) => void): unknown;
+    removeAllListeners(event?: string): unknown;
+  };
+  const wrapper: BonjourLike = {
     publish(opts) {
       const svc: Service = instance.publish({
         name: opts.name,
@@ -70,7 +99,17 @@ export const defaultBonjourFactory: BonjourFactory = () => {
     destroy() {
       instance.destroy();
     },
+    on(event, listener) {
+      return emitter.on(event, listener);
+    },
+    off(event, listener) {
+      return emitter.off(event, listener);
+    },
+    removeAllListeners(event) {
+      return emitter.removeAllListeners(event);
+    },
   };
+  return wrapper;
 };
 
 /**
@@ -118,6 +157,20 @@ export class MdnsService implements OnModuleInit, OnApplicationShutdown {
     this.name = name;
     this.port = port;
     this.host = host;
+    // 4R review #36: attach an ``error`` listener on the underlying
+    // bonjour instance as soon as it is available. The ``bonjour``
+    // library emits ``'error'`` asynchronously when UDP bind fails
+    // (EADDRINUSE on 5353, EACCES without Avahi, etc.) — without a
+    // listener Node's ``EventEmitter`` re-throws and crashes the
+    // process. This is the expected steady state on a QNAP container
+    // without Avahi / Bonjour installed; we log + carry on instead.
+    if (this.bonjourInstance) {
+      this.bonjourInstance.on('error', (err: Error) => {
+        this.logger.warn(
+          `mDNS bonjour error (continuing without responder): ${err.message}`,
+        );
+      });
+    }
   }
 
   /** The fully-qualified Bonjour name (``<name>.local``). */

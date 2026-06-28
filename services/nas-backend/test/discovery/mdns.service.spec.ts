@@ -64,6 +64,20 @@ class FakeBonjour {
   destroy(): void {
     for (const b of this.browsers) b.destroy();
   }
+  // 4R review #36: ``MdnsService`` attaches an ``error`` listener
+  // on construction. The fake exposes no-op stubs so the existing
+  // tests keep passing without exercising the error path (the new
+  // ``#36`` describe block uses an ``EventEmitter``-based fake
+  // that DOES count the listeners).
+  on(_event: 'error', _listener: (err: Error) => void): unknown {
+    return this;
+  }
+  off(_event: 'error', _listener: (err: Error) => void): unknown {
+    return this;
+  }
+  removeAllListeners(_event?: string): unknown {
+    return this;
+  }
 }
 
 function buildFakeBonjour(): {
@@ -158,6 +172,19 @@ describe('MdnsService', () => {
       publish(): unknown {
         throw new Error('mdns responder unavailable');
       }
+      // 4R review #36: ``MdnsService`` attaches an ``error``
+      // listener on construction; the throwing fake surfaces that
+      // surface as no-ops so the constructor does not crash before
+      // ``onModuleInit`` (which is what actually throws here).
+      on(_event: 'error', _listener: (err: Error) => void): unknown {
+        return this;
+      }
+      off(_event: 'error', _listener: (err: Error) => void): unknown {
+        return this;
+      }
+      removeAllListeners(_event?: string): unknown {
+        return this;
+      }
     }
     const service = await buildService({
       bonjour: new ThrowingBonjour() as unknown as FakeBonjour,
@@ -247,5 +274,30 @@ describe('MdnsService bonjour error listener (#36)', () => {
     expect(bonjour.listenerCount('error')).toBeGreaterThanOrEqual(1);
     expect(() => bonjour.emit('error', new Error('EACCES bind 5353')))
       .not.toThrow();
+  });
+
+  it('emits no UnhandledPromiseRejection when the bonjour instance errors after boot', async () => {
+    // Triangulation: the listener must be wired up at construction
+    // time, NOT at onModuleInit time — otherwise an early emit
+    // between the two would still crash. We assert by emitting
+    // BEFORE onModuleInit runs.
+    const bonjour = new EmittingBonjour();
+    const moduleRef = await Test.createTestingModule({
+      providers: [
+        MdnsService,
+        { provide: BONJOUR, useValue: bonjour },
+        { provide: MDNS_SERVICE_NAME, useValue: 'alejandria-nas' },
+        { provide: MDNS_SERVICE_PORT, useValue: 3000 },
+        { provide: MDNS_SERVICE_HOST, useValue: '192.168.1.50' },
+      ],
+    }).compile();
+    // Module construction instantiates the service → listener is
+    // attached as a side-effect. The error path is now safe.
+    const service = moduleRef.get(MdnsService);
+    expect(bonjour.listenerCount('error')).toBeGreaterThanOrEqual(1);
+    expect(() => bonjour.emit('error', new Error('boom before init')))
+      .not.toThrow();
+    // Boot still works afterwards.
+    await expect(service.onModuleInit()).resolves.toBeUndefined();
   });
 });
