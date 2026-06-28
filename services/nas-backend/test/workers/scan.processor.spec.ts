@@ -57,9 +57,14 @@ function toChildProcess(fake: FakeChild): ChildProcess {
 /**
  * Test-only factory that mirrors ``ScanProcessor``'s signature but
  * lets each test inject the exact ``spawn`` behaviour it needs.
+ *
+ * ``libraryRoot: '/'`` keeps the existing spawn-contract tests
+ * focused on the sidecar surface — path sanitization has its
+ * own ``describe`` block below that exercises the configured
+ * root.
  */
 function makeProcessor(spawnImpl: SpawnFn): ScanProcessor {
-  return new ScanProcessor({ spawn: spawnImpl });
+  return new ScanProcessor({ spawn: spawnImpl, libraryRoot: '/' });
 }
 
 describe('ScanProcessor (BullMQ sidecar spawn)', () => {

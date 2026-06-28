@@ -1,4 +1,5 @@
 import { ChildProcess, SpawnOptions, spawn as defaultSpawn } from 'child_process';
+import { relative as pathRelative, resolve as resolvePath } from 'path';
 import { Logger } from '@nestjs/common';
 
 /**
@@ -66,6 +67,15 @@ export interface ScanProcessorOptions {
    * pinned venv interpreter.
    */
   pythonCommand?: string;
+  /**
+   * Override the library root used for path sanitization.
+   * Defaults to ``process.env.NAS_LIBRARY_ROOT`` and finally to
+   * ``"/share/biblioteca/raw/"``. Every accepted scan path is
+   * resolved against this root and MUST stay inside it; paths
+   * that escape are rejected with ``SidecarError`` (code
+   * ``INVALID_PATH``) so they never reach ``spawn``.
+   */
+  libraryRoot?: string;
 }
 
 /**
@@ -102,6 +112,14 @@ export class SidecarError extends Error {
 }
 
 /**
+ * Default library root. Used when ``NAS_LIBRARY_ROOT`` is unset
+ * AND ``ScanProcessorOptions.libraryRoot`` is not provided. The
+ * trailing slash matters: ``path.relative`` treats one root as
+ * a prefix of the other, so we normalise both sides.
+ */
+const DEFAULT_LIBRARY_ROOT = '/share/biblioteca/raw/';
+
+/**
  * Scan processor — the BullMQ-side half of the
  * ``alejandria-sidecar`` boundary. Owns spawning the sidecar CLI,
  * collecting its JSON envelope, and surfacing typed errors when
@@ -115,6 +133,14 @@ export class SidecarError extends Error {
  * the spawn contract is pinned by ``test/workers/scan.processor
  * .spec.ts`` in isolation.
  *
+ * Path sanitization (#33, 4R review): every ``scan`` job path is
+ * resolved against the configured library root and rejected
+ * unless it stays inside that root. ``..`` segments, paths that
+ * start with ``-`` (argv injection), and absolute paths outside
+ * the root all fail fast with ``code = INVALID_PATH`` BEFORE
+ * ``spawn`` is invoked — no shell, no ``exec``, no chance of
+ * escape.
+ *
  * Acceptance: the BullMQ worker that wraps this processor MUST
  * catch {@link SidecarError} and ack the job so a corrupt input
  * does not halt the queue (see ``nas-scanner-workers`` spec
@@ -127,12 +153,19 @@ export class ScanProcessor {
   // fallback are interchangeable.
   private readonly spawn: SpawnFn;
   private readonly pythonCommand: string;
+  private readonly libraryRoot: string;
 
   constructor(options: ScanProcessorOptions = {}) {
     this.spawn =
       options.spawn ??
       (defaultSpawn as unknown as SpawnFn);
     this.pythonCommand = options.pythonCommand ?? 'python';
+    const rawRoot =
+      options.libraryRoot ??
+      process.env.NAS_LIBRARY_ROOT ??
+      DEFAULT_LIBRARY_ROOT;
+    // Normalise so ``path.relative`` treats both sides the same way.
+    this.libraryRoot = resolvePath(rawRoot);
   }
 
   /**
@@ -141,7 +174,63 @@ export class ScanProcessor {
    * or spawn failure.
    */
   async handle(job: ScanJob): Promise<SidecarEnvelope> {
-    return this.runExtract(job.path);
+    const safePath = this.sanitizePath(job.path);
+    return this.runExtract(safePath);
+  }
+
+  /**
+   * Resolve and validate the scan path against the configured
+   * library root. Throws {@link SidecarError} with
+   * ``code = 'INVALID_PATH'`` for any input that would escape the
+   * root, inject argv flags, or fail to resolve.
+   *
+   * Resolution rules:
+   *
+   *   1. Empty / non-string → ``INVALID_PATH``.
+   *   2. Path starts with ``-`` → ``INVALID_PATH`` (argv
+   *      injection: ``python -m alejandria_sidecar extract -c``
+   *      would be read by ``argparse`` as a flag).
+   *   3. ``path.resolve(root, input)`` is computed and then
+   *      checked against the root via ``path.relative`` so
+   *      ``../`` segments, absolute escapes, and symlinks (where
+   *      supported) all surface the same way.
+   *   4. The resolved absolute path is returned.
+   */
+  private sanitizePath(rawPath: string): string {
+    if (typeof rawPath !== 'string' || rawPath.length === 0) {
+      throw new SidecarError({
+        code: 'INVALID_PATH',
+        exitCode: -1,
+        stderr: '',
+        envelope: null,
+        message: 'scan path is empty or not a string',
+      });
+    }
+    if (rawPath.startsWith('-')) {
+      throw new SidecarError({
+        code: 'INVALID_PATH',
+        exitCode: -1,
+        stderr: '',
+        envelope: null,
+        message: `scan path may not start with '-': ${rawPath}`,
+      });
+    }
+    const resolved = resolvePath(this.libraryRoot, rawPath);
+    const rel = pathRelative(this.libraryRoot, resolved);
+    // Empty relative path = the root itself; we accept it so the
+    // sidecar reports FILE_UNREADABLE for the directory. Anything
+    // starting with ``..`` or absolute (``path.isAbsolute``)
+    // escapes the root and is rejected.
+    if (rel === '' || (!rel.startsWith('..') && !rel.startsWith('/'))) {
+      return resolved;
+    }
+    throw new SidecarError({
+      code: 'INVALID_PATH',
+      exitCode: -1,
+      stderr: '',
+      envelope: null,
+      message: `scan path escapes library root (${this.libraryRoot}): ${rawPath}`,
+    });
   }
 
   /**
