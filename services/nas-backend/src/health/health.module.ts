@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { Pool } from 'pg';
 import Redis from 'ioredis';
+import { DatabaseModule, PG_POOL_TOKEN } from '../database/database.module';
 import { HealthController } from './health.controller';
 import { HealthService, PingFn } from './health.service';
 
@@ -11,22 +12,26 @@ import { HealthService, PingFn } from './health.service';
  * (``DATABASE_PING``, ``REDIS_PING``) so e2e tests can override them
  * to simulate outage scenarios without touching the real network.
  *
- * Real ``pg.Pool`` + ``ioredis`` instances are created lazily here so
- * tests that never bootstrap the module do not open sockets.
+ * 4R review #40 — PG_POOL is NOT redefined here. ``HealthModule``
+ * imports ``DatabaseModule`` and re-uses the singleton pool it
+ * registers. Before this fix the module declared its own
+ * ``PG_POOL`` provider with a hard-coded localhost URL, opening a
+ * SECOND ``pg.Pool`` against the same database and shadowing
+ * ``DatabaseModule``'s provider in the AppModule DI graph.
+ *
+ * The Redis client is local to this module because no other
+ * feature owns it yet (BullMQ workers import ``ioredis`` directly
+ * via ``buildRedis()`` so there is no shared module to import).
+ *
+ * Both ping providers are kept as injectable string tokens so
+ * tests can override them with a stub without touching real
+ * network clients.
  */
 @Module({
+  imports: [DatabaseModule],
   controllers: [HealthController],
   providers: [
     HealthService,
-    {
-      provide: 'PG_POOL',
-      useFactory: (): Pool => {
-        const connectionString =
-          process.env.DATABASE_URL ??
-          'postgresql://alejandria:alejandria@localhost:5432/alejandria';
-        return new Pool({ connectionString, connectionTimeoutMillis: 1000 });
-      },
-    },
     {
       provide: 'REDIS_CLIENT',
       useFactory: (): Redis => {
@@ -44,7 +49,7 @@ import { HealthService, PingFn } from './health.service';
     },
     {
       provide: 'DATABASE_PING',
-      inject: ['PG_POOL'],
+      inject: [PG_POOL_TOKEN],
       useFactory: (pool: Pool): PingFn => async () => {
         await pool.query('SELECT 1');
       },
