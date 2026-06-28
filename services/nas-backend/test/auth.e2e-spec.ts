@@ -93,7 +93,9 @@ class InMemoryDevicesRepository {
 }
 
 async function buildApp(opts: {
-  pin?: string;
+  pin?: string | undefined;
+  /** When true, leave NAS_PAIR_PIN untouched instead of writing a default. */
+  pinUnset?: boolean;
   ttlDays?: number;
   jwtSecret?: string;
   jwtTtlHours?: number;
@@ -101,12 +103,17 @@ async function buildApp(opts: {
   app: INestApplication;
   devices: InMemoryDevicesRepository;
 }> {
-  setEnv({
-    NAS_PAIR_PIN: opts.pin ?? '0000',
+  const envOverrides: Record<string, string> = {
     NAS_PIN_TTL_DAYS: String(opts.ttlDays ?? '30'),
     NAS_JWT_SECRET: opts.jwtSecret ?? 'test-secret-do-not-use-in-prod-must-be-32+bytes',
     NAS_JWT_TTL_HOURS: String(opts.jwtTtlHours ?? '24'),
-  });
+  };
+  if (opts.pinUnset) {
+    delete process.env.NAS_PAIR_PIN;
+  } else {
+    envOverrides.NAS_PAIR_PIN = opts.pin ?? '0000';
+  }
+  setEnv(envOverrides);
   const devices = new InMemoryDevicesRepository();
   const moduleRef: TestingModule = await Test.createTestingModule({
     imports: [AppModule],
@@ -348,6 +355,40 @@ describe('Auth module — boot-time security validation', () => {
     }
     expect(threw).toBe(true);
     expect(message).toMatch(/NAS_JWT_SECRET/);
+    delete process.env.NODE_ENV;
+  });
+
+  it('refuses to start when NAS_PAIR_PIN is unset', async () => {
+    process.env.NODE_ENV = 'production';
+    let threw = false;
+    let message = '';
+    try {
+      const { app } = await buildApp({ pinUnset: true });
+      await app.close();
+    } catch (err) {
+      threw = true;
+      message = err instanceof Error ? err.message : String(err);
+    }
+    expect(threw).toBe(true);
+    expect(message).toMatch(/NAS_PAIR_PIN/);
+    delete process.env.NODE_ENV;
+  });
+
+  it('refuses to start when NAS_PAIR_PIN is shorter than 8 characters', async () => {
+    process.env.NODE_ENV = 'production';
+    let threw = false;
+    let message = '';
+    try {
+      // 4-character PIN — short enough to brute-force in seconds
+      // and below the documented minimum length of 8.
+      const { app } = await buildApp({ pin: '0000' });
+      await app.close();
+    } catch (err) {
+      threw = true;
+      message = err instanceof Error ? err.message : String(err);
+    }
+    expect(threw).toBe(true);
+    expect(message).toMatch(/NAS_PAIR_PIN/);
     delete process.env.NODE_ENV;
   });
 });
