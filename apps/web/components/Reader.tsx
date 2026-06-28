@@ -1,20 +1,20 @@
 'use client'
 
 import dynamic from 'next/dynamic'
-import { useMemo } from 'react'
+import { useCallback, useMemo, useState } from 'react'
 
 import type { BookRow } from './BookList'
 import { ProgressBar } from './ProgressBar'
 import type { PdfBook } from './PdfViewer'
 
 /**
- * Reader for a single book (PR-3B).
+ * Reader for a single book (PR-3C).
  *
- * Per `book-reader` + `pdf-reader` specs, this component is a Client
+ * Per `book-reader` + `pdf-reader` specs the component is a Client
  * Component (`'use client'`) that mounts:
  *
  *  1. A header with the book's title and author
- *  2. A `<ProgressBar />` driven by the `currentPage` / `totalPages` props
+ *  2. A `<ProgressBar />` driven by the current page + total pages
  *  3. A lazy-loaded PDF surface via `next/dynamic({ ssr:false })`
  *
  * The PDF surface lives in a separate module so `pdfjs-dist`'s
@@ -22,9 +22,9 @@ import type { PdfBook } from './PdfViewer'
  * is gated on `typeof window !== 'undefined'` so the route can
  * still render during SSR or in jsdom-based unit tests.
  *
- * The Reader takes the lightweight `BookRow` shape from the
- * catalog list and projects it into the richer `PdfBook` shape
- * the PDF surface needs (adding `filePath`).
+ * Page navigation flows through the Reader's local `currentPage`
+ * state, and the `onPageChange` prop is fired so the parent route
+ * can persist the new position to the local SQLite.
  */
 
 const PdfSurface = dynamic(
@@ -39,21 +39,42 @@ export interface ReaderProps {
   book: BookRow
   currentPage: number
   totalPages: number
+  /** Absolute path to the PDF on disk (optional — surfaces "missing" UI when absent). */
+  filePath?: string
+  /** Forwarded to the parent so it can persist progress. */
+  onPageChange?: (page: number) => void
 }
 
-function toPdfBook(book: BookRow): PdfBook {
+function toPdfBook(book: BookRow, filePath: string): PdfBook {
   return {
     id: book.id,
     title: book.title,
     author: book.author,
-    filePath: '',
+    filePath,
   }
 }
 
-export function Reader({ book, currentPage, totalPages }: ReaderProps): React.JSX.Element {
+export function Reader({
+  book,
+  currentPage,
+  totalPages,
+  filePath,
+  onPageChange,
+}: ReaderProps): React.JSX.Element {
   // `useMemo` keeps the boolean stable across re-renders so React
   // does not tear down the dynamic boundary on every parent update.
   const isClient = useMemo(() => typeof window !== 'undefined', [])
+  // Local page state — PdfViewer's next/prev buttons fire
+  // `onPageChange` which advances this. The parent route is also
+  // notified so it can persist progress.
+  const [page, setPage] = useState(currentPage)
+  const handlePageChange = useCallback(
+    (next: number) => {
+      setPage(next)
+      if (onPageChange) onPageChange(next)
+    },
+    [onPageChange],
+  )
 
   return (
     <section aria-label={`Reader for ${book.title}`}>
@@ -62,10 +83,14 @@ export function Reader({ book, currentPage, totalPages }: ReaderProps): React.JS
         <p>{book.author}</p>
       </header>
 
-      <ProgressBar currentPage={currentPage} totalPages={totalPages} />
+      <ProgressBar currentPage={page} totalPages={totalPages} />
 
-      {isClient ? (
-        <PdfSurface book={toPdfBook(book)} currentPage={currentPage} />
+      {isClient && filePath ? (
+        <PdfSurface
+          book={toPdfBook(book, filePath)}
+          currentPage={page}
+          onPageChange={handlePageChange}
+        />
       ) : (
         <div data-testid="reader-pdf-surface">Loading reader…</div>
       )}

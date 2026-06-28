@@ -16,20 +16,21 @@ import { render, screen, fireEvent, act } from '@testing-library/react'
  *    does not need a network round-trip
  */
 
-const renderPageMock = vi.fn(async () => ({
-  getViewport: vi.fn(() => ({ width: 100, height: 100 })),
-  render: vi.fn(() => ({ promise: Promise.resolve() })),
-}))
-
-const getDocumentMock = vi.fn(() => ({
-  promise: Promise.resolve({
-    numPages: 3,
-    getPage: vi.fn(async () => renderPageMock()),
-    destroy: vi.fn(),
-  }),
-}))
-
-const globalWorkerMock = vi.fn()
+const { renderPageMock, getDocumentMock } = vi.hoisted(() => {
+  const renderPageMock = vi.fn(async (pageNumber: number) => ({
+    pageNumber,
+    getViewport: vi.fn(() => ({ width: 100, height: 100 })),
+    render: vi.fn(() => ({ promise: Promise.resolve() })),
+  }))
+  const getDocumentMock = vi.fn(() => ({
+    promise: Promise.resolve({
+      numPages: 3,
+      getPage: vi.fn(async (pageNumber: number) => renderPageMock(pageNumber)),
+      destroy: vi.fn(),
+    }),
+  }))
+  return { renderPageMock, getDocumentMock }
+})
 
 vi.mock('pdfjs-dist', () => ({
   getDocument: getDocumentMock,
