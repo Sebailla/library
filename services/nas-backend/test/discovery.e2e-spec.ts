@@ -83,9 +83,9 @@ async function buildApp(overrides: {
   lanIps: string[];
 }): Promise<INestApplication> {
   setEnv({
-    NAS_PAIR_PIN: '0000',
+    NAS_PAIR_PIN: '12345678',
     NAS_PIN_TTL_DAYS: '30',
-    NAS_JWT_SECRET: 'test-secret-do-not-use-in-prod',
+    NAS_JWT_SECRET: 'test-secret-do-not-use-in-prod-must-be-32+bytes',
     NAS_JWT_TTL_HOURS: '24',
     PORT: String(overrides.port),
   });

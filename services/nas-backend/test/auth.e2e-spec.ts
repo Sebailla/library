@@ -111,7 +111,7 @@ async function buildApp(opts: {
   if (opts.pinUnset) {
     delete process.env.NAS_PAIR_PIN;
   } else {
-    envOverrides.NAS_PAIR_PIN = opts.pin ?? '0000';
+    envOverrides.NAS_PAIR_PIN = opts.pin ?? '12345678';
   }
   setEnv(envOverrides);
   const devices = new InMemoryDevicesRepository();
@@ -166,11 +166,11 @@ describe('POST /api/auth/pair', () => {
   });
 
   it('returns 201 with {token, expires_at, device_id} on valid PIN', async () => {
-    const { app } = await buildApp({ pin: '123456' });
+    const { app } = await buildApp({ pin: '12345678' });
     try {
       const res = await request(app.getHttpServer())
         .post('/api/auth/pair')
-        .send({ pin: '123456', device_name: 'iPad de Seba' })
+        .send({ pin: '12345678', device_name: 'iPad de Seba' })
         .expect(201);
       expect(typeof res.body.token).toBe('string');
       expect(res.body.token.split('.')).toHaveLength(3); // JWT format
@@ -189,11 +189,11 @@ describe('POST /api/auth/pair', () => {
   });
 
   it('returns 401 BAD_PIN on invalid PIN', async () => {
-    const { app } = await buildApp({ pin: '123456' });
+    const { app } = await buildApp({ pin: '12345678' });
     try {
       const res = await request(app.getHttpServer())
         .post('/api/auth/pair')
-        .send({ pin: '000000', device_name: 'X' })
+        .send({ pin: '99999999', device_name: 'X' })
         .expect(401);
       expect(res.body.error).toMatchObject({ code: 'BAD_PIN' });
     } finally {
@@ -205,11 +205,11 @@ describe('POST /api/auth/pair', () => {
     // A negative TTL models "the PIN window has closed"; the
     // service MUST surface that as ``PIN_EXPIRED`` rather than a
     // generic 500.
-    const { app } = await buildApp({ pin: '123456', ttlDays: -1 });
+    const { app } = await buildApp({ pin: '12345678', ttlDays: -1 });
     try {
       const res = await request(app.getHttpServer())
         .post('/api/auth/pair')
-        .send({ pin: '123456', device_name: 'X' })
+        .send({ pin: '12345678', device_name: 'X' })
         .expect(401);
       expect(res.body.error).toMatchObject({ code: 'PIN_EXPIRED' });
     } finally {
@@ -218,11 +218,11 @@ describe('POST /api/auth/pair', () => {
   });
 
   it('persists a device row keyed by the returned device_id', async () => {
-    const { app, devices } = await buildApp({ pin: '123456' });
+    const { app, devices } = await buildApp({ pin: '12345678' });
     try {
       const res = await request(app.getHttpServer())
         .post('/api/auth/pair')
-        .send({ pin: '123456', device_name: 'iPad de Seba' })
+        .send({ pin: '12345678', device_name: 'iPad de Seba' })
         .expect(201);
       const stored = await devices.findByDeviceId(res.body.device_id);
       expect(stored).not.toBeNull();
@@ -247,7 +247,7 @@ describe('POST /api/auth/refresh', () => {
     try {
       const pair = await request(app.getHttpServer())
         .post('/api/auth/pair')
-        .send({ pin: '0000', device_name: 'iPad' })
+        .send({ pin: '12345678', device_name: 'iPad' })
         .expect(201);
       const oldToken = pair.body.token as string;
 
@@ -268,7 +268,7 @@ describe('POST /api/auth/refresh', () => {
     try {
       const pair = await request(app.getHttpServer())
         .post('/api/auth/pair')
-        .send({ pin: '0000', device_name: 'iPad' })
+        .send({ pin: '12345678', device_name: 'iPad' })
         .expect(201);
       const oldToken = pair.body.token as string;
 
@@ -381,7 +381,7 @@ describe('Auth module — boot-time security validation', () => {
     try {
       // 4-character PIN — short enough to brute-force in seconds
       // and below the documented minimum length of 8.
-      const { app } = await buildApp({ pin: '0000' });
+      const { app } = await buildApp({ pin: '1234' });
       await app.close();
     } catch (err) {
       threw = true;

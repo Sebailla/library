@@ -68,15 +68,43 @@ function hashToken(token: string): string {
  * Configuration is read from environment variables at construction
  * time so changes mid-run are not picked up:
  *
- *   NAS_PAIR_PIN      — single shared PIN (default "0000")
+ *   NAS_PAIR_PIN      — single shared PIN. **Required**, ≥ 8
+ *                       characters. Boot-time check via
+ *                       {@link resolvePairPin} (4R review #32).
  *   NAS_PIN_TTL_DAYS  — TTL window for the PIN itself (default 30)
- *   NAS_JWT_SECRET    — HMAC secret for the JWT (default "dev-secret-change-me")
+ *   NAS_JWT_SECRET    — HMAC secret for the JWT. **Required**,
+ *                       ≥ 32 bytes; boot-time check in
+ *                       ``auth.module.ts`` (4R review #32).
  *   NAS_JWT_TTL_HOURS — JWT lifetime in hours (default 24)
  *
  * ``tokenHash`` stored in the ``devices`` table is the SHA-256
  * digest of the issued JWT so a stolen DB row does not yield a
  * usable bearer token and ``refresh`` rotation can be observed.
  */
+/**
+ * Resolve and validate the NAS_PAIR_PIN at boot (#32, 4R review).
+ *
+ *   - Unset   → throw. A silent fallback like ``"0000"`` lets an
+ *               attacker brute-force the 4-digit space in seconds.
+ *   - < 8 chars → throw. 8+ characters pushes the search space
+ *               past the point where an offline attack is
+ *               practical at the documented rate limit.
+ */
+function resolvePairPin(): string {
+  const pin = process.env.NAS_PAIR_PIN;
+  if (!pin || pin.length === 0) {
+    throw new Error(
+      'NAS_PAIR_PIN is required. Set it to a random string of at least 8 characters before starting alejandria-nas-backend.',
+    );
+  }
+  if (pin.length < 8) {
+    throw new Error(
+      `NAS_PAIR_PIN must be at least 8 characters. Got ${pin.length}.`,
+    );
+  }
+  return pin;
+}
+
 @Injectable()
 export class AuthService {
   private readonly logger = new Logger(AuthService.name);
@@ -88,7 +116,7 @@ export class AuthService {
     @Inject(DEVICES_REPOSITORY) private readonly devices: DevicesRepository,
     private readonly jwt: JwtService,
   ) {
-    this.pin = process.env.NAS_PAIR_PIN ?? '0000';
+    this.pin = resolvePairPin();
     this.pinTtlDays = Number(process.env.NAS_PIN_TTL_DAYS ?? '30');
     this.jwtTtlHours = Number(process.env.NAS_JWT_TTL_HOURS ?? '24');
   }
