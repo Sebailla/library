@@ -1,7 +1,16 @@
 import { Test } from '@nestjs/testing';
 import { Logger } from '@nestjs/common';
-import { WorkersBootstrap, ScanJobPayload } from '../../src/workers/workers.module';
-import { ScanProcessor } from '../../src/workers/scan.processor';
+import { UnrecoverableError } from 'bullmq';
+import {
+  WorkersBootstrap,
+  ScanJobPayload,
+  buildQueueOptions,
+  makeResilientProcessor,
+} from '../../src/workers/workers.module';
+import {
+  ScanProcessor,
+  SidecarError,
+} from '../../src/workers/scan.processor';
 import {
   DOWNLOADS_QUEUE_NAME,
   DownloadsProcessor,
@@ -146,5 +155,93 @@ describe('BullMQ module wiring', () => {
 
   it('exposes the downloads queue name constant for the worker', () => {
     expect(DOWNLOADS_QUEUE_NAME).toBe('downloads');
+  });
+});
+
+/**
+ * Resilience contract — 4R review #35.
+ *
+ * BullMQ workers MUST be wired with retry + DLQ defaults so a single
+ * corrupt file does not block the queue forever. Workers MUST also
+ * translate {@link SidecarError} into {@link UnrecoverableError} so
+ * BullMQ skips further retries (corrupt input does not get better
+ * with repetition).
+ *
+ * Tests cover the two surfaces we expose:
+ *
+ *   - ``buildQueueOptions`` — the shared default options factory
+ *     (attempts, exponential backoff, removeOnComplete/Fail).
+ *   - ``makeResilientProcessor`` — wraps a processor so a thrown
+ *     {@link SidecarError} becomes {@link UnrecoverableError}
+ *     before it reaches BullMQ's retry logic.
+ */
+describe('buildQueueOptions (#35 retry + DLQ defaults)', () => {
+  it('caps attempts at 3 with exponential backoff (5s base)', () => {
+    const opts = buildQueueOptions();
+    expect(opts.attempts).toBe(3);
+    expect(opts.backoff).toEqual({ type: 'exponential', delay: 5000 });
+  });
+
+  it('trims completed jobs after 1h (age) or 1000 (count)', () => {
+    const opts = buildQueueOptions();
+    expect(opts.removeOnComplete).toEqual({ age: 3600, count: 1000 });
+  });
+
+  it('keeps failed jobs for 24h so an operator can inspect them', () => {
+    const opts = buildQueueOptions();
+    expect(opts.removeOnFail).toEqual({ age: 86400 });
+  });
+});
+
+describe('makeResilientProcessor (#35 SidecarError → UnrecoverableError)', () => {
+  it('translates a SidecarError into an UnrecoverableError', async () => {
+    const inner = async (): Promise<unknown> => {
+      throw new SidecarError({
+        code: 'FILE_UNREADABLE',
+        exitCode: 5,
+        stderr: 'python: error: file not found\n',
+        envelope: null,
+      });
+    };
+    const wrapped = makeResilientProcessor(inner);
+    await expect(wrapped({} as never)).rejects.toBeInstanceOf(
+      UnrecoverableError,
+    );
+  });
+
+  it('preserves the SidecarError code on the translated error', async () => {
+    const inner = async (): Promise<unknown> => {
+      throw new SidecarError({
+        code: 'BACKEND_UNAVAILABLE',
+        exitCode: 7,
+        stderr: '',
+        envelope: null,
+      });
+    };
+    const wrapped = makeResilientProcessor(inner);
+    await expect(wrapped({} as never)).rejects.toMatchObject({
+      name: 'SidecarError',
+      code: 'BACKEND_UNAVAILABLE',
+    });
+  });
+
+  it('passes transient (non-Sidecar) errors through unchanged so BullMQ retries them', async () => {
+    const inner = async (): Promise<unknown> => {
+      throw new Error('redis connection lost');
+    };
+    const wrapped = makeResilientProcessor(inner);
+    // Must NOT be UnrecoverableError — BullMQ should retry transient failures.
+    await expect(wrapped({} as never)).rejects.toThrow(
+      'redis connection lost',
+    );
+    await expect(wrapped({} as never)).rejects.not.toBeInstanceOf(
+      UnrecoverableError,
+    );
+  });
+
+  it('resolves with the inner result on success', async () => {
+    const inner = async (): Promise<unknown> => ({ ok: 1 });
+    const wrapped = makeResilientProcessor(inner);
+    await expect(wrapped({} as never)).resolves.toEqual({ ok: 1 });
   });
 });
