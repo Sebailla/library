@@ -15,6 +15,7 @@
     "paths": {
       "@app/*": ["src/*"]
     },
+    "ignoreDeprecations": "5.0",
     "strict": true,
     "strictNullChecks": true,
     "noImplicitAny": true,
