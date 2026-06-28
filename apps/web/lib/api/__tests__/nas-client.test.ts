@@ -5,7 +5,27 @@ import {
   type NasClientOptions,
   type NasPairRequest,
   type NasPairResponse,
+  type NasStartDownloadRequest,
 } from '../nas-client'
+
+/**
+ * Read a request header in a jsdom-safe way. The jsdom `Headers`
+ * implementation is incomplete (it returns `null` for keys set via
+ * the plain-object form), so we read directly from the recorded
+ * `init.headers` record when it is a plain object, falling back to
+ * `Headers.get` for the rare `Headers` instance.
+ */
+function headerOf(call: FetchCall, name: string): string | null {
+  const raw = call.init.headers as Record<string, string> | Headers | undefined
+  if (!raw) return null
+  if (typeof (raw as Headers).get === 'function') {
+    return (raw as Headers).get(name)
+  }
+  // Case-insensitive lookup over a plain record.
+  const record = raw as Record<string, string>
+  const match = Object.keys(record).find((k) => k.toLowerCase() === name.toLowerCase())
+  return match ? (record[match] ?? null) : null
+}
 
 /**
  * TDD tests for `lib/api/nas-client.ts` (PR-3C).
@@ -89,7 +109,13 @@ describe('nas-client (PR-3C)', () => {
       expect(calls).toHaveLength(1)
       expect(calls[0]!.url).toBe('http://nas.local:3000/api/auth/pair')
       expect(calls[0]!.init.method).toBe('POST')
-      expect(JSON.parse(calls[0]!.init.body as string)).toEqual(request)
+      // The wire format is snake_case (`device_name`) to match the
+      // PR-2 `PairDto` — assert the actual payload, not the typed
+      // input.
+      expect(JSON.parse(calls[0]!.init.body as string)).toEqual({
+        pin: '123456',
+        device_name: 'MacBook Pro',
+      })
       expect(result).toEqual(pairResponse)
     })
 
@@ -101,8 +127,7 @@ describe('nas-client (PR-3C)', () => {
 
       await client.pair({ pin: '111', deviceName: 'iPad' })
 
-      const headers = new Headers(calls[0]!.init.headers as HeadersInit)
-      expect(headers.get('authorization')).toBeNull()
+      expect(headerOf(calls[0]!, 'authorization')).toBeNull()
     })
 
     it('throws when the server returns 4xx', async () => {
@@ -184,8 +209,7 @@ describe('nas-client (PR-3C)', () => {
 
       await client.listBooks({})
 
-      const headers = new Headers(calls[0]!.init.headers as HeadersInit)
-      expect(headers.get('authorization')).toBe('Bearer jwt-abc')
+      expect(headerOf(calls[0]!, 'authorization')).toBe('Bearer jwt-abc')
     })
 
     it('omits query params when filters are not provided', async () => {
@@ -318,8 +342,7 @@ describe('nas-client (PR-3C)', () => {
 
       await client.getDiscoveryNetwork()
 
-      const headers = new Headers(calls[0]!.init.headers as HeadersInit)
-      expect(headers.get('authorization')).toBe('Bearer jwt')
+      expect(headerOf(calls[0]!, 'authorization')).toBe('Bearer jwt')
     })
   })
 
@@ -340,10 +363,11 @@ describe('nas-client (PR-3C)', () => {
         deviceName: 'iPad',
         userId: 'user-1',
         fileSizeBytes: 1_000_000,
-      })
+      } satisfies NasStartDownloadRequest)
 
       expect(calls[0]!.url).toBe('http://nas.local:3000/api/downloads')
       expect(calls[0]!.init.method).toBe('POST')
+      // Wire shape is snake_case (PR-2E) — assert the actual payload.
       const body = JSON.parse(calls[0]!.init.body as string)
       expect(body).toEqual({
         book_id: 7,
@@ -394,60 +418,42 @@ describe('nas-client (PR-3C)', () => {
 
       await client.downloadFile(7, '/tmp/dest.bin', () => {})
 
-      const headers = new Headers(calls[0]!.init.headers as HeadersInit)
-      expect(headers.get('range')).toBe('bytes=0-')
+      expect(headerOf(calls[0]!, 'range')).toBe('bytes=0-')
       expect(calls[0]!.url).toBe('http://nas.local:3000/api/files/7')
     })
 
     it('invokes the onProgress callback with bytes received', async () => {
-      const { fetch } = makeFetchRecorder(() =>
-        emptyResponse(206, { 'content-length': '10' }),
-      )
+      // Build a real Response whose body streams two chunks. The
+      // nas-client's `downloadFile` just drains the body and reports
+      // bytes per chunk — the resumable / disk-writing transport is
+      // exercised in `lib/download/range-client.test.ts`.
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new Uint8Array([1, 2, 3]))
+          controller.enqueue(new Uint8Array([4, 5, 6]))
+          controller.close()
+        },
+      })
+      const response = new Response(stream, {
+        status: 206,
+        headers: { 'content-range': 'bytes 0-5/6' },
+      })
+      const { fetch } = makeFetchRecorder(() => response)
       const client = createNasClient({
         fetch,
         baseUrl: 'http://nas.local:3000',
         token: 'jwt',
       })
 
-      // Stub a minimal stream implementation so the test runs in
-      // jsdom (which does not implement ReadableStream.from).
-      const original = globalThis.ReadableStream
-      const streamBody = (() => {
-        const chunks = [new Uint8Array([1, 2, 3]), new Uint8Array([4, 5, 6])]
-        let i = 0
-        return {
-          getReader() {
-            return {
-              read() {
-                if (i < chunks.length) {
-                  return Promise.resolve({
-                    value: chunks[i++],
-                    done: false,
-                  })
-                }
-                return Promise.resolve({ value: undefined, done: true })
-              },
-              releaseLock() {},
-            }
-          },
-        }
-      })()
-      globalThis.ReadableStream = function () {
-        return streamBody
-      } as unknown as typeof ReadableStream
+      const progressValues: number[] = []
+      await client.downloadFile(7, '/tmp/dest.bin', (bytes) => {
+        progressValues.push(bytes)
+      })
 
-      try {
-        const progressValues: number[] = []
-        await client.downloadFile(7, '/tmp/dest.bin', (bytes) => {
-          progressValues.push(bytes)
-        })
-        // Two chunks (3 + 3) should produce at least two progress
-        // callbacks; the total must reflect the full file size.
-        expect(progressValues.length).toBeGreaterThanOrEqual(2)
-        expect(progressValues[progressValues.length - 1]).toBe(6)
-      } finally {
-        globalThis.ReadableStream = original
-      }
+      // Two chunks (3 + 3) should produce two progress callbacks;
+      // the total must reflect the full file size.
+      expect(progressValues.length).toBeGreaterThanOrEqual(2)
+      expect(progressValues[progressValues.length - 1]).toBe(6)
     })
   })
 
