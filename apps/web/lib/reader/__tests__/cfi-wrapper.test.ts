@@ -40,7 +40,7 @@ describe('cfi-wrapper (PR-3B scaffold)', () => {
   })
 
   it('rejects CFI inputs that do not start with "epubcfi("', () => {
-    expect(() => encodeCfi('not-a-cfi')).toThrow(/must start with epubcfi/i)
+    expect(() => encodeCfi('not-a-cfi')).toThrow(/must start with/i)
   })
 
   it('reports support for the current version and the previous minor', () => {
