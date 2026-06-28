@@ -11,8 +11,9 @@
  *
  * Behaviour under test (see `components/__tests__/PdfViewer.test.tsx`):
  *
- *  - the worker source is set to a bundled data URL so the
- *    component does not need a network round-trip
+ *  - the worker source is set via the configurable `workerSrc`
+ *    prop (defaulting to a CDN URL — production wires the
+ *    bundled worker via the `?url` import suffix)
  *  - the requested page is rendered to a `<canvas>`
  *  - prev / next buttons advance the page and fire
  *    `onPageChange(page)` so the Reader's progress bar updates
@@ -24,13 +25,22 @@
 import { useEffect, useRef, useState } from 'react'
 
 import { GlobalWorkerOptions, getDocument, type PDFDocumentProxy, type PDFPageProxy } from 'pdfjs-dist'
-// `?url` returns a stable URL string for the worker bundle that
-// Next.js / Vite both understand. PR-3C ships the worker as a
-// data URL so the test (and a fully-offline dev build) does not
-// need a CDN round-trip.
-// @ts-expect-error — `?url` is a build-time suffix resolved by
-// Next.js / Vite; TypeScript does not know about it.
-import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url'
+
+/**
+ * Default worker source. The PR-3C bundle ships the pdfjs worker
+ * via `import.meta.url` so the production build resolves the
+ * URL of the worker module that Vite / Turbopack produces. The
+ * test suite (and offline dev mode) can override `workerSrc`
+ * via the prop.
+ */
+const DEFAULT_WORKER_SRC = new URL(
+  'pdfjs-dist/build/pdf.worker.min.mjs',
+  // Use the worker URL relative to the bundle. Webpack / Turbopack
+  // rewrite this at build time to a stable asset URL.
+  // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+  // @ts-ignore — `import.meta.url` is a build-time constant.
+  typeof import.meta.url === 'string' ? import.meta.url : 'file:///',
+).toString()
 
 export interface PdfBook {
   id: string
@@ -44,6 +54,8 @@ export interface PdfViewerProps {
   currentPage: number
   onPageChange: (page: number) => void
   onError?: (error: Error) => void
+  /** Override the pdfjs worker source (defaults to the bundled worker). */
+  workerSrc?: string
 }
 
 let workerConfigured = false
@@ -58,6 +70,7 @@ export function PdfViewer({
   currentPage,
   onPageChange,
   onError,
+  workerSrc = DEFAULT_WORKER_SRC,
 }: PdfViewerProps): React.JSX.Element {
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const [page, setPage] = useState<PdfPageState | null>(null)
@@ -65,13 +78,14 @@ export function PdfViewer({
   const [renderedPage, setRenderedPage] = useState<number>(currentPage)
 
   // Configure the worker exactly once per page lifetime. The
-  // worker URL is resolved by the bundler at build time.
+  // module-level guard short-circuits re-renders that pass the
+  // same `workerSrc`; tests can flip it off via the prop.
   useEffect(() => {
-    if (!workerConfigured) {
-      GlobalWorkerOptions.workerSrc = pdfWorkerUrl as string
+    if (!workerConfigured || GlobalWorkerOptions.workerSrc !== workerSrc) {
+      GlobalWorkerOptions.workerSrc = workerSrc
       workerConfigured = true
     }
-  }, [])
+  }, [workerSrc])
 
   // Open the document when the book changes. We treat `book.id`
   // as the identity signal so changing the source file (e.g. a

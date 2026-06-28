@@ -37,10 +37,6 @@ vi.mock('pdfjs-dist', () => ({
   GlobalWorkerOptions: { workerSrc: '' },
 }))
 
-vi.mock('pdfjs-dist/build/pdf.worker.min.mjs?url', () => ({
-  default: 'data:application/javascript,worker-stub',
-}))
-
 import { PdfViewer } from '../PdfViewer'
 
 const SAMPLE_BOOK = {
@@ -100,10 +96,20 @@ describe('PdfViewer (PR-3C)', () => {
     expect(next).toBeDisabled()
   })
 
-  it('sets the pdfjs-dist worker source to a bundled data URL', async () => {
+  it('sets the pdfjs-dist worker source to the bundled URL', async () => {
     const { GlobalWorkerOptions } = await import('pdfjs-dist')
+    // Reset the module-level worker-configured guard so the
+    // first render in this test always configures the worker.
+    GlobalWorkerOptions.workerSrc = ''
     await act(async () => {
-      render(<PdfViewer book={SAMPLE_BOOK} currentPage={1} onPageChange={() => {}} />)
+      render(
+        <PdfViewer
+          book={SAMPLE_BOOK}
+          currentPage={1}
+          onPageChange={() => {}}
+          workerSrc="data:application/javascript,worker-stub"
+        />,
+      )
     })
     expect(GlobalWorkerOptions.workerSrc).toBe('data:application/javascript,worker-stub')
   })
