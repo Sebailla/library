@@ -214,6 +214,12 @@ class InMemoryDownloadsRepository {
     row.bytesTransferred = bytesTransferred;
   }
 
+  async updateProgress(id: number, bytesTransferred: number): Promise<void> {
+    const row = this.rows.find((r) => r.id === id);
+    if (!row) return;
+    row.bytesTransferred = bytesTransferred;
+  }
+
   async listByDevice(
     deviceId: string,
     opts: { limit?: number } = {},
