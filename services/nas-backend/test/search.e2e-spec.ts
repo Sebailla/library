@@ -171,7 +171,7 @@ describe('GET /api/search (pgroonga-backed full-text search)', () => {
     }
   });
 
-  it('returns 400 when ?q is missing', async () => {
+  it('returns 400 with VALIDATION_FAILED envelope when ?q is missing', async () => {
     const { app } = await buildApp();
     try {
       const token = await pairAndGetToken(app);
@@ -179,16 +179,95 @@ describe('GET /api/search (pgroonga-backed full-text search)', () => {
         .get('/api/search')
         .set('Authorization', `Bearer ${token}`)
         .expect(400);
-      // NestJS ValidationPipe defaults to { statusCode: 400,
-      // message, error: 'Bad Request' }. The contract here is
-      // "the server rejects the request when ?q is missing",
-      // which is satisfied by the 400 status + presence of the
-      // ``message`` field listing the failed constraint.
-      expect(res.body.statusCode).toBe(400);
-      expect(Array.isArray(res.body.message)).toBe(true);
-      expect(
-        (res.body.message as string[]).some((m) => m.includes('q')),
-      ).toBe(true);
+      // Project-wide ValidationPipe exceptionFactory (#41) wraps
+      // the failed constraints in the project's standard envelope
+      // so the 4R contract is the same on every route.
+      expect(res.body.error.code).toBe('VALIDATION_FAILED');
+      expect(res.body.error.details).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ field: expect.stringMatching(/q/) }),
+        ]),
+      );
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('returns 400 when ?q is whitespace-only (4R review #39)', async () => {
+    const { app } = await buildApp();
+    try {
+      const token = await pairAndGetToken(app);
+      const res = await request(app.getHttpServer())
+        .get('/api/search?q=%20%20%20')
+        .set('Authorization', `Bearer ${token}`)
+        .expect(400);
+      expect(res.body.error.code).toBe('VALIDATION_FAILED');
+      expect(res.body.error.details).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ field: expect.stringMatching(/q/) }),
+        ]),
+      );
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('returns 400 when ?q exceeds the 256-char cap (4R review #39)', async () => {
+    const { app } = await buildApp();
+    try {
+      const token = await pairAndGetToken(app);
+      const oversize = 'a'.repeat(257);
+      const res = await request(app.getHttpServer())
+        .get(`/api/search?q=${oversize}`)
+        .set('Authorization', `Bearer ${token}`)
+        .expect(400);
+      expect(res.body.error.code).toBe('VALIDATION_FAILED');
+      expect(res.body.error.details).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ field: expect.stringMatching(/q/) }),
+        ]),
+      );
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('returns 400 when ?q contains characters outside the whitelist (4R review #39)', async () => {
+    // The whitelist allows letters, digits, spaces, and a small set
+    // of punctuation used by book titles / ISBNs. A control character
+    // like ``\x00`` must trip the @Matches guard before it ever
+    // reaches the pgroonga query builder.
+    const { app } = await buildApp();
+    try {
+      const token = await pairAndGetToken(app);
+      const res = await request(app.getHttpServer())
+        .get('/api/search?q=foo%00bar')
+        .set('Authorization', `Bearer ${token}`)
+        .expect(400);
+      expect(res.body.error.code).toBe('VALIDATION_FAILED');
+      expect(res.body.error.details).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ field: expect.stringMatching(/q/) }),
+        ]),
+      );
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('accepts a 256-char query at the cap boundary (4R review #39)', async () => {
+    const search = new InMemorySearchRepository();
+    const exact = 'a'.repeat(256);
+    search.setFixture(exact, []);
+    const { app } = await buildApp({ search });
+    try {
+      const token = await pairAndGetToken(app);
+      const res = await request(app.getHttpServer())
+        .get(`/api/search?q=${exact}`)
+        .set('Authorization', `Bearer ${token}`)
+        .expect(200);
+      expect(res.body.data).toEqual([]);
+      expect(res.body.total).toBe(0);
     } finally {
       await app.close();
     }
