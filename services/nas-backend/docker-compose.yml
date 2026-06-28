@@ -14,7 +14,17 @@
 
 services:
   postgres:
-    image: groonga/pgroonga:latest
+    # 4R review #43 — build the pg_cron overlay on top of the
+    # upstream pgroonga image so the nightly defrag job can be
+    # scheduled at ``CREATE EXTENSION`` time. To use the bare
+    # ``groonga/pgroonga:latest`` image instead, drop the
+    # ``build:`` stanza and uncomment the ``image:`` line below —
+    # migration 011 downgrades gracefully so the missing extension
+    # does not break ``npm run migrate``.
+    build:
+      context: .
+      dockerfile: Dockerfile.pg
+    # image: groonga/pgroonga:latest
     container_name: alejandria-postgres
     restart: unless-stopped
     environment:

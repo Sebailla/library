@@ -9,6 +9,15 @@ NestJS application that backs the **alejandria-v2** NAS catalog.
 > - **PR-2G** — resilience (BullMQ retry cap, mDNS error listener,
 >   `schema_migrations` table, `/livez` + `/readyz` split,
 >   scan-processor timeout + buffer cap)
+> - **PR-2G.1** — correctness + readability blockers from the 4R
+>   review: search query has `@MaxLength(256)` + regex whitelist
+>   (#39), `HealthModule` shares `DatabaseModule`'s `PG_POOL`
+>   instead of opening a parallel pool (#40), global `ValidationPipe`
+>   returns the project envelope `#41`), `/api/downloads` no longer
+>   trusts body fields for attribution (POST derives from bearer,
+>   PATCH enforces `row.device_id === bearer`, `/by-device/:id`
+>   enforces path-vs-bearer match — #42), nightly `pg_cron` job
+>   defragmenting the pgroonga indexes at 03:00 UTC (#43)
 > - **PR-2B** — Postgres schema, pgroonga indexes, idempotent
 >   migrations, repository layer (`books`, `categories`, `sagas`,
 >   `downloads`)
@@ -450,6 +459,96 @@ Files shipped in PR-2B + PR-2C:
 | `008_pgroonga_indexes.sql` | pgroonga indexes on `books.title`, `books.excerpt` |
 | `009_seed_categories.sql` | bilingual taxonomy seed (Ciencia, Arte, Literatura, …) |
 | `010_devices.sql` | `devices` table — UUID + SHA-256 token hash + INET ip_address |
+| `011_pgroonga_defrag.sql` | `pgroonga_index_defrag(text)` helper + nightly pg_cron job at 03:00 UTC (4R review #43) |
+
+### pgroonga ops runbook (4R review #43)
+
+Migration 011 installs a PL/pgSQL helper that wraps
+`pgroonga_command('defrag', …)` and schedules a nightly pg_cron
+job at **03:00 UTC** that defrags both `books_title_pgroonga_idx`
+and `books_excerpt_pgroonga_idx`.
+
+#### Why defrag?
+
+pgroonga stores its inverted index on disk as a series of
+segments. Heavy INSERT/UPDATE traffic on the `books` table
+eventually fragments those segments, which slows down queries.
+The standard mitigation is to run `pgroonga_command('defrag')`
+during a quiet window — 03:00 UTC is when the NAS is least
+likely to be serving downloads.
+
+#### The migration is best-effort
+
+The standard `groonga/pgroonga` Docker image **does not bundle
+pg_cron**. The migration wraps `CREATE EXTENSION pg_cron` in a
+`DO … EXCEPTION` block that downgrades to a `NOTICE` when the
+extension is missing, so a vanilla `groonga/pgroonga` install
+still migrates cleanly. Operators who want nightly defrag must
+install pg_cron separately (see below).
+
+#### Manual install + schedule (vanilla `groonga/pgroonga` image)
+
+If you're running a stock `groonga/pgroonga` image, install
+pg_cron and schedule the job manually after `npm run migrate`:
+
+```bash
+# 1. Install pg_cron on the postgres container. The official
+#    pg_cron extension requires shared_preload_libraries='pg_cron'
+#    at startup; rebuild or swap the image if your image does
+#    not already include it (see the docker-compose override below).
+docker exec -u postgres alejandria-postgres \
+  psql -d alejandria -c "CREATE EXTENSION pg_cron;"
+
+# 2. (One time, after each migrate run) schedule the nightly
+#    job — migration 011 unschedules + schedules this same
+#    jobname, so re-running migrate replaces the schedule.
+docker exec -u postgres alejandria-postgres psql -d alejandria <<'SQL'
+SELECT cron.unschedule('alejandria_pgroonga_defrag');
+SELECT cron.schedule(
+  'alejandria_pgroonga_defrag',
+  '0 3 * * *',
+  $job$
+    SELECT pgroonga_index_defrag('books_title_pgroonga_idx');
+    SELECT pgroonga_index_defrag('books_excerpt_pgroonga_idx');
+  $job$
+);
+SQL
+```
+
+#### Manual defrag (one-shot, no cron)
+
+If pg_cron is not available, you can still defragment on
+demand — the helper exists unconditionally once migration 011
+has run:
+
+```bash
+docker exec -u postgres alejandria-postgres psql -d alejandria -c \
+  "SELECT pgroonga_index_defrag('books_title_pgroonga_idx');"
+```
+
+#### Verify the schedule
+
+```bash
+docker exec -u postgres alejandria-postgres psql -d alejandria -c \
+  "SELECT jobname, schedule, active FROM cron.job WHERE jobname = 'alejandria_pgroonga_defrag';"
+```
+
+Expected output:
+
+```
+           jobname            | schedule  | active
+------------------------------+-----------+--------
+ alejandria_pgroonga_defrag   | 0 3 * * * | t
+```
+
+#### docker-compose override (auto-install pg_cron)
+
+To avoid the manual install steps above, build a small
+postgres Dockerfile that layers pg_cron on top of
+`groonga/pgroonga`. See `services/nas-backend/Dockerfile.pg`
+for the recipe (one extra `RUN apt-get install … postgresql-16-cron`
+plus the `shared_preload_libraries` GUC in
+`postgresql.conf`).
 
 ## Repositories
 
