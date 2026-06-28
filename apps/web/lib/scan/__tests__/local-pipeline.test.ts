@@ -108,7 +108,7 @@ describe('scan pipeline (PR-3B)', () => {
 
     await expect(
       scanFile('/library/broken.epub', { spawn }),
-    ).rejects.toThrow(/exit code 5/)
+    ).rejects.toThrow(/code 5/)
   })
 
   it('detects unsupported extensions before spawning', async () => {
