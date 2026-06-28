@@ -166,11 +166,26 @@ export interface INasClient {
     downloadId: number,
     request: NasCompleteDownloadRequest,
   ): Promise<NasCompleteDownloadResponse>
+  /**
+   * Stream a book file to disk via `GET /api/files/:id` with
+   * `Range: bytes=0-`. The caller supplies the byte writer so
+   * the transport stays dependency-injected (tests use an
+   * in-memory writer; production wires `node:fs/promises`).
+   */
   downloadFile(
     bookId: number,
     destPath: string,
     onProgress: (bytesReceived: number) => void,
+    options?: DownloadFileOptions,
   ): Promise<void>
+}
+
+/** Options for {@link INasClient.downloadFile}. */
+export interface DownloadFileOptions {
+  /** Writer used to persist the body. Defaults to `node:fs/promises.writeFile`. */
+  writeFile?: (path: string, data: Uint8Array) => Promise<void>
+  /** Start byte for the Range header (defaults to 0). */
+  start?: number
 }
 
 /**
@@ -265,43 +280,58 @@ async function sendJson<T>(state: NasClientState, path: string, options: Request
   return (await response.json()) as T
 }
 
-interface DownloadStreamChunk {
-  value: Uint8Array
-}
-
 /**
- * Drain a `Response.body` while invoking `onProgress` per chunk.
+ * Drain a `Response.body` into a single `Uint8Array` while
+ * invoking `onProgress` per chunk.
  *
  * The implementation is intentionally tiny: we do not depend on
  * Node streams (the client also runs in the renderer during PR-4)
- * and we do not care about backpressure here because the destination
- * is a `node:fs` write stream owned by the caller. The Range
- * request + resumable semantics live in `lib/download/range-client.ts`;
- * this method just streams the body once and reports bytes received.
+ * and we do not care about backpressure here because the
+ * destination is a `node:fs` write owned by the caller. The
+ * resumable transport (Range header + chunked writer) lives in
+ * `lib/download/range-client.ts`; this method just materialises
+ * the body and reports bytes received.
  */
-async function streamToCallback(
+async function drainToBuffer(
   response: Response,
   onProgress: (bytes: number) => void,
-): Promise<number> {
+): Promise<Uint8Array> {
   if (!response.body) {
-    return 0
+    return new Uint8Array()
   }
   const reader = response.body.getReader()
+  const chunks: Uint8Array[] = []
   let total = 0
   try {
     while (true) {
-      const result = (await reader.read()) as { done: boolean; value?: Uint8Array | DownloadStreamChunk }
+      const result = (await reader.read()) as { done: boolean; value?: Uint8Array }
       if (result.done) break
-      const value = result.value as Uint8Array | undefined
-      if (value && typeof value.byteLength === 'number') {
-        total += value.byteLength
-        onProgress(total)
-      }
+      const value = result.value
+      if (!value) continue
+      chunks.push(value)
+      total += value.byteLength
+      onProgress(total)
     }
   } finally {
     reader.releaseLock()
   }
-  return total
+  if (chunks.length === 0) return new Uint8Array()
+  if (chunks.length === 1) {
+    const only = chunks[0]!
+    if (only.byteLength === total) return only
+  }
+  const out = new Uint8Array(total)
+  let offset = 0
+  for (const chunk of chunks) {
+    out.set(chunk, offset)
+    offset += chunk.byteLength
+  }
+  return out
+}
+
+const defaultDownloadWriter = async (path: string, data: Uint8Array): Promise<void> => {
+  const { writeFile } = await import('node:fs/promises')
+  await writeFile(path, data)
 }
 
 /**
@@ -413,12 +443,14 @@ export function createNasClient(options: NasClientOptions = {}): INasClient {
 
     async downloadFile(
       bookId: number,
-      _destPath: string,
+      destPath: string,
       onProgress: (bytesReceived: number) => void,
+      options: DownloadFileOptions = {},
     ): Promise<void> {
+      const start = options.start ?? 0
       const url = `${state.baseUrl}/api/files/${bookId}`
       const headers: Record<string, string> = {
-        range: 'bytes=0-',
+        range: `bytes=${start}-`,
       }
       if (state.token) {
         headers['authorization'] = `Bearer ${state.token}`
@@ -427,7 +459,9 @@ export function createNasClient(options: NasClientOptions = {}): INasClient {
       if (!response.ok && response.status !== 206) {
         throw describeError(response.status, null)
       }
-      await streamToCallback(response, onProgress)
+      const writeFile = options.writeFile ?? defaultDownloadWriter
+      const bytes = await drainToBuffer(response, onProgress)
+      await writeFile(destPath, bytes)
     },
   }
 }

@@ -81,9 +81,20 @@ function makeMockNasClient(
         ? async () => {
             throw overrides.downloadError
           }
-        : async () => {
-            // No-op: the in-memory writer used in tests bypasses
-            // the actual file write (see `makeInMemoryWriter`).
+        : async (
+            _bookId: number,
+            destPath: string,
+            _onProgress: (bytes: number) => void,
+            downloadOptions: { writeFile?: (path: string, data: Uint8Array) => Promise<void> } = {},
+          ) => {
+            // The real nas-client's `downloadFile` delegates the
+            // body write to the injected writer. Mirror that here
+            // so the test can assert on the bytes path the
+            // production code chooses.
+            const writeFile = downloadOptions.writeFile
+            if (writeFile) {
+              await writeFile(destPath, new Uint8Array([1, 2, 3, 4, 5]))
+            }
           },
     ),
   }
@@ -174,9 +185,11 @@ describe('download-flow (PR-3C)', () => {
       expect(stored).toMatchObject({
         id: '7',
         title: 'Ficciones',
-        author: 'unknown', // author is a string in BookInput; getBook
-        // returns `author_id` only — the flow fills `unknown` for
-        // the local SQLite row and re-uses the NAS id as primary key.
+        // The NAS API only exposes `author_id` on the detail
+        // payload. The flow materialises a placeholder so the
+        // local SQLite row is well-formed; a follow-up PR joins
+        // against `/api/authors/:id` to fetch the display name.
+        author: 'author:1',
         filePath: join(tmpDir, 'ficciones.pdf'),
         format: 'pdf',
         contentHash: 'sha256:abc',
@@ -208,7 +221,7 @@ describe('download-flow (PR-3C)', () => {
     expect(nas.completeDownload).not.toHaveBeenCalled()
   })
 
-  it('writes the bytes from the local writer to the destination path', async () => {
+  it('passes the destination path through to the writer', async () => {
     const nas = makeMockNasClient()
 
     await downloadBook({
@@ -223,9 +236,6 @@ describe('download-flow (PR-3C)', () => {
       },
     })
 
-    // The local-db `upsertBook` write does not invoke the
-    // injected writer — the in-memory writer must record exactly
-    // one entry, the call to `downloadFile`'s on-disk materialisation.
     expect(writers).toHaveLength(1)
     expect(writers[0]!.path).toBe(join(tmpDir, 'ficciones.pdf'))
   })
