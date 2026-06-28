@@ -220,7 +220,7 @@ describe('nas server actions (PR-3C)', () => {
 
       expect(result.ok).toBe(true)
       expect(result.value?.id).toBe('book-1')
-      expect(scanFileMock).toHaveBeenCalledWith('/library/rayuela.epub', expect.anything())
+      expect(scanFileMock).toHaveBeenCalledWith('/library/rayuela.epub')
     })
   })
 })
