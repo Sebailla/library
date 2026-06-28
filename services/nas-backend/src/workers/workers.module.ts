@@ -7,16 +7,16 @@ import {
   OnModuleInit,
   Optional,
 } from '@nestjs/common';
-import { ConnectionOptions, Worker } from 'bullmq';
+import { ConnectionOptions, Job, UnrecoverableError, Worker } from 'bullmq';
 import { Redis } from 'ioredis';
 import { DownloadsModule } from '../downloads/downloads.module';
 import { BULLMQ_CONNECTION, buildBullMqConnection } from './bullmq.config';
 import {
   DOWNLOADS_QUEUE_NAME,
+  DownloadResumeJob,
   DownloadsProcessor,
-  makeDownloadsWorker,
 } from './downloads.processor';
-import { ScanProcessor } from './scan.processor';
+import { ScanProcessor, SidecarError } from './scan.processor';
 
 /**
  * Wire-format for jobs enqueued on the ``scan`` queue. The actual
@@ -25,6 +25,81 @@ import { ScanProcessor } from './scan.processor';
 export interface ScanJobPayload {
   path: string;
   sha256_hint?: string;
+}
+
+/**
+ * Shared BullMQ queue options (4R review #35).
+ *
+ *   - ``attempts: 3`` with exponential 5s backoff lets transient
+ *     spawn failures (Redis blip, momentary CPU pressure) recover
+ *     before the job is moved to the failed set.
+ *   - ``removeOnComplete`` keeps the completed set bounded so a
+ *     long-running queue does not grow unbounded; 1h of history is
+ *     enough for operators to inspect recent runs.
+ *   - ``removeOnFail`` keeps failed jobs for 24h so an operator
+ *     has a full day to triage before BullMQ reaps them.
+ *
+ * The factory returns a plain object so the same options are
+ * applied to both the ``scan`` and ``downloads`` workers AND the
+ * (future) producer ``Queue.defaultJobOptions`` so callers that
+ * call ``queue.add(...)`` without explicit options still pick up
+ * the same retry budget.
+ *
+ * The values are exposed as a free function (not a constant) so
+ * tests can assert against the same object the wiring uses
+ * without reaching into module internals.
+ */
+export function buildQueueOptions(): {
+  attempts: number;
+  backoff: { type: 'exponential'; delay: number };
+  removeOnComplete: { age: number; count: number };
+  removeOnFail: { age: number };
+} {
+  return {
+    attempts: 3,
+    backoff: { type: 'exponential', delay: 5000 },
+    removeOnComplete: { age: 3600, count: 1000 },
+    removeOnFail: { age: 86400 },
+  };
+}
+
+/**
+ * Shape of the inner processor the {@link makeResilientProcessor}
+ * wrapper composes. Mirrors BullMQ's ``Processor<DataType,
+ * ResultType>`` shape so the wrapped function is drop-in compatible
+ * with ``new Worker(name, processor, opts)``.
+ */
+type InnerProcessor<T> = (job: Job<T, unknown, string>) => Promise<unknown>;
+
+/**
+ * Wrap a BullMQ processor so a thrown {@link SidecarError} is
+ * translated into an {@link UnrecoverableError} (4R review #35).
+ *
+ * Rationale: corrupt input (FILE_UNREADABLE, INVALID_PATH, etc.)
+ * does not get better with retries — the same file will fail
+ * the same way next attempt. Marking the failure ``unrecoverable``
+ * lets BullMQ skip the remaining attempts and move the job
+ * straight to ``failed``, freeing the queue head for the next
+ * job. Transient errors (Redis blip, spawn ENOMEM, etc.) are
+ * rethrown as-is so BullMQ's normal retry loop applies.
+ */
+export function makeResilientProcessor<T>(
+  inner: InnerProcessor<T>,
+): InnerProcessor<T> {
+  return async (job: Job<T, unknown, string>): Promise<unknown> => {
+    try {
+      return await inner(job);
+    } catch (err) {
+      if (err instanceof SidecarError) {
+        // Preserve the SidecarError code/message on the wrapped
+        // error so the failed set keeps the same diagnostic shape;
+        // BullMQ's failed job carries ``failedReason`` from the
+        // error message, so we keep the original message verbatim.
+        throw new UnrecoverableError(err.message);
+      }
+      throw err;
+    }
+  };
 }
 
 /**
@@ -81,12 +156,37 @@ export class WorkersBootstrap implements OnModuleInit, OnApplicationShutdown {
     }
     const conn: BullMqConnection = this.connection as unknown as BullMqConnection;
     try {
+      // ``removeOnComplete`` + ``removeOnFail`` are valid
+      // ``WorkerOptions`` (BullMQ applies them on the worker
+      // side). ``attempts`` + ``backoff`` live on the producer
+      // Queue's ``defaultJobOptions`` because that is the only
+      // BullMQ surface that honours them; the same factory
+      // {@link buildQueueOptions} feeds both so the retry
+      // budget is consistent regardless of where a job is
+      // added.
+      const queueOpts = buildQueueOptions();
       const scan = new Worker<ScanJobPayload, unknown>(
         'scan',
-        async (job) => this.scanProcessor.handle(job.data),
-        { connection: conn },
+        makeResilientProcessor<ScanJobPayload>(async (job) =>
+          this.scanProcessor.handle(job.data),
+        ),
+        {
+          connection: conn,
+          removeOnComplete: queueOpts.removeOnComplete,
+          removeOnFail: queueOpts.removeOnFail,
+        },
       );
-      const downloads = makeDownloadsWorker(this.downloadsProcessor, conn);
+      const downloads = new Worker<DownloadResumeJob, unknown>(
+        DOWNLOADS_QUEUE_NAME,
+        makeResilientProcessor<DownloadResumeJob>(async (job) =>
+          this.downloadsProcessor.handle(job.data),
+        ),
+        {
+          connection: conn,
+          removeOnComplete: queueOpts.removeOnComplete,
+          removeOnFail: queueOpts.removeOnFail,
+        },
+      );
       this.workers.push({ name: 'scan', worker: scan });
       this.workers.push({ name: DOWNLOADS_QUEUE_NAME, worker: downloads });
       this.logger.log(

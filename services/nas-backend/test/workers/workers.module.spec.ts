@@ -209,20 +209,23 @@ describe('makeResilientProcessor (#35 SidecarError → UnrecoverableError)', () 
     );
   });
 
-  it('preserves the SidecarError code on the translated error', async () => {
+  it('preserves the SidecarError diagnostic message on the translated error', async () => {
     const inner = async (): Promise<unknown> => {
       throw new SidecarError({
         code: 'BACKEND_UNAVAILABLE',
         exitCode: 7,
-        stderr: '',
+        stderr: 'tesseract: missing data files',
         envelope: null,
       });
     };
     const wrapped = makeResilientProcessor(inner);
-    await expect(wrapped({} as never)).rejects.toMatchObject({
-      name: 'SidecarError',
-      code: 'BACKEND_UNAVAILABLE',
-    });
+    // BullMQ's failed-job ``failedReason`` is the error message;
+    // operators rely on it to triage why the file was rejected, so
+    // the wrapped error MUST carry the SidecarError's diagnostic
+    // text verbatim — NOT just "UnrecoverableError".
+    await expect(wrapped({} as never)).rejects.toThrow(
+      /tesseract: missing data files/,
+    );
   });
 
   it('passes transient (non-Sidecar) errors through unchanged so BullMQ retries them', async () => {
@@ -243,5 +246,22 @@ describe('makeResilientProcessor (#35 SidecarError → UnrecoverableError)', () 
     const inner = async (): Promise<unknown> => ({ ok: 1 });
     const wrapped = makeResilientProcessor(inner);
     await expect(wrapped({} as never)).resolves.toEqual({ ok: 1 });
+  });
+
+  it('translates every SidecarError variant (FILE_UNREADABLE + INVALID_PATH) to UnrecoverableError', async () => {
+    for (const code of ['FILE_UNREADABLE', 'INVALID_PATH', 'SPAWN_FAILED']) {
+      const inner = async (): Promise<unknown> => {
+        throw new SidecarError({
+          code,
+          exitCode: 1,
+          stderr: `${code} simulated`,
+          envelope: null,
+        });
+      };
+      const wrapped = makeResilientProcessor(inner);
+      await expect(wrapped({} as never)).rejects.toBeInstanceOf(
+        UnrecoverableError,
+      );
+    }
   });
 });
