@@ -3,6 +3,11 @@ import { INestApplication } from '@nestjs/common';
 import request from 'supertest';
 import { AppModule } from '../src/app.module';
 import { DEVICES_REPOSITORY } from '../src/auth/devices.repository';
+import {
+  LAN_IPS,
+  MDNS_NAME,
+  TAILSCALE_IP,
+} from '../src/discovery/discovery.service';
 
 /**
  * End-to-end contract tests for ``GET /api/discovery/info`` (PR-2F,
@@ -82,7 +87,7 @@ async function buildApp(overrides: {
     NAS_PIN_TTL_DAYS: '30',
     NAS_JWT_SECRET: 'test-secret-do-not-use-in-prod',
     NAS_JWT_TTL_HOURS: '24',
-    NAS_HTTP_PORT: String(overrides.port),
+    PORT: String(overrides.port),
   });
   const moduleRef: TestingModule = await Test.createTestingModule({
     imports: [AppModule],
@@ -91,15 +96,15 @@ async function buildApp(overrides: {
     .useValue(new InMemoryDevicesRepository())
     // The mDNS publisher is injected by string token so tests do
     // not need a real Bonjour responder.
-    .overrideProvider('MDNS_NAME')
+    .overrideProvider(MDNS_NAME)
     .useValue(overrides.mdnsName)
     // Tailscale detection is wrapped behind a string token too so
     // tests can simulate both "tailscale up" and "not installed".
-    .overrideProvider('TAILSCALE_IP')
+    .overrideProvider(TAILSCALE_IP)
     .useValue(overrides.tailscaleIp)
     // LAN IP enumeration is delegated to a string token so tests
     // can pin the list deterministically.
-    .overrideProvider('LAN_IPS')
+    .overrideProvider(LAN_IPS)
     .useValue(overrides.lanIps)
     .compile();
   const app = moduleRef.createNestApplication();

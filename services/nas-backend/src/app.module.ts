@@ -8,6 +8,7 @@ import { AuthorsModule } from './authors/authors.module';
 import { SearchModule } from './search/search.module';
 import { DownloadsModule } from './downloads/downloads.module';
 import { WorkersModule } from './workers/workers.module';
+import { DiscoveryModule } from './discovery/discovery.module';
 
 /**
  * Root NestJS module for the NAS backend.
@@ -28,9 +29,11 @@ import { WorkersModule } from './workers/workers.module';
  * spawn). The workers module gracefully no-ops when Redis is
  * down so the rest of the API keeps serving traffic.
  *
- * Additional modules land in chained PRs:
- *
- * - PR-2F: ``DiscoveryModule`` (mDNS + Tailscale)
+ * PR-2F adds the ``DiscoveryModule`` which exposes the public
+ * ``GET /api/discovery/info`` endpoint. The endpoint is open (no
+ * ``JwtAuthGuard``) because clients need it BEFORE they have a
+ * bearer token; it returns the mDNS service name, HTTP port,
+ * Tailscale IPv4 (or ``null``), and the host's LAN IPv4 list.
  */
 @Module({
   imports: [
@@ -43,6 +46,7 @@ import { WorkersModule } from './workers/workers.module';
     SearchModule,
     DownloadsModule,
     WorkersModule,
+    DiscoveryModule,
   ],
 })
 export class AppModule {}
