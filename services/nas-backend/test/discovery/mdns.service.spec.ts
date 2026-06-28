@@ -1,5 +1,11 @@
 import { Test } from '@nestjs/testing';
-import { MdnsService } from '../../src/discovery/mdns.service';
+import {
+  BONJOUR,
+  MDNS_SERVICE_HOST,
+  MDNS_SERVICE_NAME,
+  MDNS_SERVICE_PORT,
+  MdnsService,
+} from '../../src/discovery/mdns.service';
 
 /**
  * Contract tests for {@link MdnsService} (PR-2F, work unit 2).
@@ -23,9 +29,14 @@ import { MdnsService } from '../../src/discovery/mdns.service';
 class FakeBrowser {
   published: Array<{ name: string; port: number; host?: string }> = [];
   closed = false;
+  stopped = false;
   publish(spec: { name: string; port: number; host?: string }): unknown {
     this.published.push(spec);
-    return { on: () => undefined, stop: () => undefined, published: true };
+    return this;
+  }
+  stop(cb?: () => void): void {
+    this.stopped = true;
+    if (cb) cb();
   }
   unpublishAll(): void {
     /* no-op */
@@ -76,19 +87,19 @@ async function buildService(opts: {
     providers: [
       MdnsService,
       {
-        provide: 'BONJOUR',
+        provide: BONJOUR,
         useValue: opts.bonjour,
       },
       {
-        provide: 'MDNS_SERVICE_NAME',
+        provide: MDNS_SERVICE_NAME,
         useValue: opts.name,
       },
       {
-        provide: 'MDNS_SERVICE_PORT',
+        provide: MDNS_SERVICE_PORT,
         useValue: opts.port,
       },
       {
-        provide: 'MDNS_SERVICE_HOST',
+        provide: MDNS_SERVICE_HOST,
         useValue: opts.host,
       },
     ],
