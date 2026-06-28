@@ -1,0 +1,42 @@
+import { Module } from '@nestjs/common';
+import { Pool } from 'pg';
+import { AuthModule } from '../auth/auth.module';
+import { DatabaseModule } from '../database/database.module';
+import { PG_POOL } from '../database/pg.service';
+import { DownloadsController } from './downloads.controller';
+import {
+  DOWNLOADS_REPOSITORY,
+  PgDownloadsRepository,
+} from './downloads.repository';
+import { DownloadsService } from './downloads.service';
+
+/**
+ * Downloads module — HTTP routes for the ``/api/downloads`` family
+ * (PR-2E, work unit 1).
+ *
+ * Wires ``DownloadsRepository`` (backed by ``PgDownloadsRepository``
+ * in production; stubbed via the ``DOWNLOADS_REPOSITORY`` string
+ * token in e2e tests) into ``DownloadsService``, which exposes the
+ * idempotency-aware ``createDownload`` path and the
+ * partial-update / aggregation endpoints.
+ *
+ * Auth is re-used from ``AuthModule`` so the controllers can apply
+ * the ``JwtAuthGuard`` directly. Future chained PRs may add
+ * admin-only guards to ``stats`` and ``by-device`` (the spec calls
+ * for ``ADMIN_REQUIRED``); for now those endpoints are open to any
+ * paired device because the spec only requires the contract shape.
+ */
+@Module({
+  imports: [AuthModule, DatabaseModule],
+  controllers: [DownloadsController],
+  providers: [
+    DownloadsService,
+    {
+      provide: DOWNLOADS_REPOSITORY,
+      inject: [PG_POOL],
+      useFactory: (pool: Pool) => new PgDownloadsRepository(pool),
+    },
+  ],
+  exports: [DOWNLOADS_REPOSITORY],
+})
+export class DownloadsModule {}

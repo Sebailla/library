@@ -180,13 +180,73 @@ In docker-compose these are wired to the in-stack service names
 
 ## What's NOT here yet
 
-PR-2D is the catalog HTTP slice (`BooksModule`, `AuthorsModule`,
-`SearchModule`). The following land in chained PRs:
+PR-2D + PR-2E ship the catalog HTTP slice, the downloads tracking
+endpoints, and the BullMQ workers that consume the Python sidecar.
+The following land in chained PRs:
 
-- **PR-2E**: `DownloadsModule`, `WorkersModule` (BullMQ + sidecar spawn)
 - **PR-2F**: `DiscoveryModule` (mDNS + Tailscale)
 
 See `openspec/changes/alejandria-v2/tasks.md` Phase 2 for the full list.
+
+## Downloads + Workers (PR-2E)
+
+PR-2E adds two related modules that close the loop between the
+HTTP layer and the Python sidecar.
+
+### Downloads HTTP surface
+
+```
+POST   /api/downloads                { book_id, device_id?, device_name?, user_id?, file_size_bytes? }
+                                    → 201 { download_id, resume_supported }
+
+PATCH  /api/downloads/:id            { completed?, bytes_transferred }
+                                    → 200 { id, completed, bytes_transferred, book_id, device_id, downloaded_at }
+
+GET    /api/downloads/stats
+                                    → 200 { total, completed, top_books: [...], top_devices: [...] }
+
+GET    /api/downloads/by-device/:device_id
+                                    → 200 { data: Download[] }
+```
+
+`POST /api/downloads` is **idempotent**: if a `(book_id, device_id)`
+pair already has a `completed = true` row, the response re-uses the
+original `download_id` and returns `resume_supported: true` instead
+of creating a duplicate row. The same `(book_id, device_id)` pair
+with an in-progress download always creates a NEW row (so the byte
+counts do not get clobbered by a reconnect).
+
+All four endpoints sit behind `JwtAuthGuard`. The repository token
+(`DOWNLOADS_REPOSITORY`) is exposed as a string so e2e tests stub
+it with an in-memory implementation.
+
+### Workers (BullMQ + sidecar)
+
+`WorkersModule` wires two BullMQ workers onto the shared Redis
+broker configured by `buildBullMqConnection` (`REDIS_HOST` /
+`REDIS_PORT` env vars, default `localhost:6379`):
+
+| Queue        | Processor                | What it does |
+|--------------|--------------------------|--------------|
+| `scan`       | `ScanProcessor`          | Shells out to `python -m alejandria_sidecar extract <path>` and parses the JSON envelope. |
+| `downloads`  | `DownloadsProcessor`     | Updates `bytes_transferred` on a download row (resume bookkeeping, off the Range-request thread). |
+
+`ScanProcessor` is built around a typed `SidecarError` (`code` +
+`exitCode` + parsed envelope) so the BullMQ worker can branch on
+`FILE_UNREADABLE` vs `BACKEND_UNAVAILABLE` vs `NOT_IMPLEMENTED`
+without parsing stderr. Errors are caught and the job is acked so a
+corrupt input never halts the queue (per
+`nas-scanner-workers` spec § "Errors are isolated, never blocking").
+
+#### Graceful Redis-down behaviour
+
+`WorkersBootstrap.onModuleInit` probes Redis with a 750ms timeout
+before starting any worker. If the broker is unreachable the
+bootstrap logs a single warning and returns; the rest of the API
+keeps serving traffic and `GET /health` reports
+`redis: down` for operators. The probe + e2e stubs make the
+workers module safe to run in CI and local dev without a live
+broker.
 
 ## Migrations
 
@@ -235,7 +295,7 @@ pgroonga instance.
 | `BooksRepository` | `insert`, `findById`, `listByAuthor`, `list` (+filters), `count`, `search` |
 | `CategoriesRepository` | `insert`, `findByPath`, `listChildren`, `listRoots`, `listForBook`, `findSubtree` (recursive CTE) |
 | `SagasRepository` | `insert`, `attachBook` (idempotent), `listByAuthor`, `listForBook`, `listBooksInSaga` |
-| `DownloadsRepository` | `insert`, `markCompleted`, `listByDevice`, `findById` |
+| `DownloadsRepository` | `insert`, `markCompleted`, `updateProgress`, `listByDevice`, `findById`, `findCompletedForDeviceAndBook`, `stats` |
 | `DevicesRepository` | `insert`, `findByDeviceId`, `updateTokenHash`, `touch` |
 | `SearchRepository` | `search` (pgroonga `&@~` + `pgroonga.score(tableoid)`) |
 

@@ -6,6 +6,8 @@ import { MeModule } from './me/me.module';
 import { BooksModule } from './books/books.module';
 import { AuthorsModule } from './authors/authors.module';
 import { SearchModule } from './search/search.module';
+import { DownloadsModule } from './downloads/downloads.module';
+import { WorkersModule } from './workers/workers.module';
 
 /**
  * Root NestJS module for the NAS backend.
@@ -21,9 +23,13 @@ import { SearchModule } from './search/search.module';
  * (pgroonga-backed full-text search), all behind the
  * ``JwtAuthGuard`` introduced in PR-2C.
  *
+ * PR-2E adds the ``DownloadsModule`` (HTTP routes for
+ * ``/api/downloads``) and the ``WorkersModule`` (BullMQ + sidecar
+ * spawn). The workers module gracefully no-ops when Redis is
+ * down so the rest of the API keeps serving traffic.
+ *
  * Additional modules land in chained PRs:
  *
- * - PR-2E: ``DownloadsModule`` + ``WorkersModule`` (BullMQ)
  * - PR-2F: ``DiscoveryModule`` (mDNS + Tailscale)
  */
 @Module({
@@ -35,6 +41,8 @@ import { SearchModule } from './search/search.module';
     BooksModule,
     AuthorsModule,
     SearchModule,
+    DownloadsModule,
+    WorkersModule,
   ],
 })
 export class AppModule {}
