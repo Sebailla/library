@@ -1,10 +1,12 @@
 import { Test } from '@nestjs/testing';
+import { EventEmitter } from 'events';
 import {
   BONJOUR,
   MDNS_SERVICE_HOST,
   MDNS_SERVICE_NAME,
   MDNS_SERVICE_PORT,
   MdnsService,
+  defaultBonjourFactory,
 } from '../../src/discovery/mdns.service';
 
 /**
@@ -166,5 +168,84 @@ describe('MdnsService', () => {
     await expect(service.onModuleInit()).resolves.toBeUndefined();
     // Service name is still queryable even when the publish failed.
     expect(service.serviceName).toBe('alejandria-nas.local');
+  });
+});
+
+/**
+ * Resilience contract — 4R review #36.
+ *
+ * ``bonjour`` emits ``'error'`` asynchronously when UDP bind fails
+ * (EADDRINUSE on 5353, EACCES without Avahi, etc.). The expected
+ * steady state on a QNAP container without Avahi / Bonjour is
+ * exactly this error. With no listener attached, Node's
+ * ``EventEmitter`` throws and the process crashes.
+ *
+ * The fix attaches a listener on the bonjour instance as soon as
+ * the factory instantiates it, so the error becomes a logged
+ * warning instead of a crash.
+ */
+describe('MdnsService bonjour error listener (#36)', () => {
+  /**
+   * Bonjour shape with an ``EventEmitter`` surface so the error
+   * listener can be attached and the test can ``emit('error')``
+   * deterministically.
+   */
+  class EmittingBonjour extends EventEmitter {
+    published: Array<{ name: string; port: number; host?: string }> = [];
+    publish(opts: { name?: string; port?: number; host?: string }): unknown {
+      this.published.push({
+        name: opts.name ?? '',
+        port: opts.port ?? 0,
+        host: opts.host,
+      });
+      return this;
+    }
+    destroy(): void {
+      this.removeAllListeners();
+    }
+    stop(_cb?: () => void): void {
+      /* no-op */
+    }
+    unpublishAll(): void {
+      /* no-op */
+    }
+  }
+
+  it('attaches an error listener on the bonjour instance (no unhandled error crash)', async () => {
+    const bonjour = new EmittingBonjour();
+    const service = await buildService({
+      bonjour: bonjour as unknown as FakeBonjour,
+      name: 'alejandria-nas',
+      port: 3000,
+      host: '192.168.1.50',
+    });
+    await service.onModuleInit();
+    // The service must have at least one ``error`` listener on the
+    // underlying bonjour instance; otherwise an async ``emit('error')``
+    // would re-throw inside Node and crash the process.
+    expect(bonjour.listenerCount('error')).toBeGreaterThanOrEqual(1);
+    // Emitting must not throw — the listener swallows + logs.
+    expect(() => bonjour.emit('error', new Error('EADDRINUSE 0.0.0.0:5353')))
+      .not.toThrow();
+  });
+
+  it('attaches an error listener even when the bonjour instance is passed via a factory function', async () => {
+    const bonjour = new EmittingBonjour();
+    const factory = (): FakeBonjour => bonjour as unknown as FakeBonjour;
+    const moduleRef = await Test.createTestingModule({
+      providers: [
+        MdnsService,
+        { provide: BONJOUR, useValue: factory },
+        { provide: MDNS_SERVICE_NAME, useValue: 'alejandria-nas' },
+        { provide: MDNS_SERVICE_PORT, useValue: 3000 },
+        { provide: MDNS_SERVICE_HOST, useValue: '192.168.1.50' },
+      ],
+    }).compile();
+    const service = moduleRef.get(MdnsService);
+    await service.onModuleInit();
+    // Same expectation: the factory-path also wires the listener.
+    expect(bonjour.listenerCount('error')).toBeGreaterThanOrEqual(1);
+    expect(() => bonjour.emit('error', new Error('EACCES bind 5353')))
+      .not.toThrow();
   });
 });
