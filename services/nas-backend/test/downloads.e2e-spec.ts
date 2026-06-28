@@ -1,5 +1,5 @@
 import { Test, TestingModule } from '@nestjs/testing';
-import { INestApplication, ValidationPipe } from '@nestjs/common';
+import { INestApplication } from '@nestjs/common';
 import request from 'supertest';
 import { AppModule } from '../src/app.module';
 import { DEVICES_REPOSITORY } from '../src/auth/devices.repository';
@@ -11,6 +11,7 @@ import {
 import { BOOKS_REPOSITORY } from '../src/books/books.repository';
 import { CATEGORIES_REPOSITORY } from '../src/books/categories.repository';
 import { SAGAS_REPOSITORY } from '../src/books/sagas.repository';
+import { buildValidationPipe } from '../src/common/validation.pipe';
 
 /**
  * End-to-end contract tests for the downloads HTTP module (PR-2E,
@@ -310,7 +311,7 @@ async function buildApp(opts: {
     .useValue(downloads)
     .compile();
   const app = moduleRef.createNestApplication();
-  app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }));
+  app.useGlobalPipes(buildValidationPipe());
   await app.init();
   return { app, downloads, books };
 }

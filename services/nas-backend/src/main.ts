@@ -1,20 +1,25 @@
 /**
  * NestJS application bootstrap for alejandria-v2 NAS backend.
  *
- * The bootstrap is intentionally minimal at this stage — the health
- * module is the only feature wired in PR-2A. Subsequent modules
- * (auth, books, search, downloads, workers, discovery, database) are
- * added in chained PRs following the work-units defined in
- * ``openspec/changes/alejandria-v2/tasks.md`` Phase 2.
+ * Wires a project-wide ValidationPipe (4R review #41) so every DTO
+ * failure — whether on body, query, or params — surfaces the same
+ * ``{ error: { code: 'VALIDATION_FAILED', message, details } }``
+ * envelope the rest of the API uses. The factory is shared with the
+ * test bootstraps in ``test/*.e2e-spec.ts`` so production and tests
+ * agree on the wire format.
  */
 import { NestFactory } from '@nestjs/core';
 import { Logger } from '@nestjs/common';
 import { AppModule } from './app.module';
+import { buildValidationPipe } from './common/validation.pipe';
 
 async function bootstrap(): Promise<void> {
   const app = await NestFactory.create(AppModule, {
     logger: ['error', 'warn', 'log'],
   });
+
+  // 4R review #41 — global ValidationPipe with the project envelope.
+  app.useGlobalPipes(buildValidationPipe());
 
   const port = Number(process.env.PORT ?? 3000);
   await app.listen(port);
