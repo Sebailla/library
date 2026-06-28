@@ -44,7 +44,7 @@ interface RecordedCall {
 }
 
 interface Recorder {
-  fetch: RangeClientFetch
+  fetch: typeof globalThis.fetch
   calls: RecordedCall[]
   writtenPaths: string[]
 }
@@ -100,9 +100,9 @@ describe('range-client (PR-3C)', () => {
     })
 
     expect(writeFile).toHaveBeenCalledTimes(1)
-    const [path, bytes] = writeFile.mock.calls[0]!
-    expect(path).toBe('/tmp/dest.bin')
-    expect(Array.from(bytes as Uint8Array)).toEqual([10, 20, 30, 40, 50])
+    const firstCall = writeFile.mock.calls[0] as unknown as [string, Uint8Array]
+    expect(firstCall[0]).toBe('/tmp/dest.bin')
+    expect(Array.from(firstCall[1] as Uint8Array)).toEqual([10, 20, 30, 40, 50])
   })
 
   it('accepts a 200 OK fallback (no Range support)', async () => {
