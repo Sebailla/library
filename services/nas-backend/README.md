@@ -180,13 +180,10 @@ In docker-compose these are wired to the in-stack service names
 
 ## What's NOT here yet
 
-PR-2D + PR-2E ship the catalog HTTP slice, the downloads tracking
-endpoints, and the BullMQ workers that consume the Python sidecar.
-The following land in chained PRs:
-
-- **PR-2F**: `DiscoveryModule` (mDNS + Tailscale)
-
-See `openspec/changes/alejandria-v2/tasks.md` Phase 2 for the full list.
+PR-2D + PR-2E + PR-2F ship the catalog HTTP slice, the downloads
+tracking endpoints, the BullMQ workers that consume the Python
+sidecar, and the mDNS + Tailscale discovery module. See
+`openspec/changes/alejandria-v2/tasks.md` Phase 2 for the full list.
 
 ## Downloads + Workers (PR-2E)
 
@@ -247,6 +244,68 @@ keeps serving traffic and `GET /health` reports
 `redis: down` for operators. The probe + e2e stubs make the
 workers module safe to run in CI and local dev without a live
 broker.
+
+## Discovery (PR-2F)
+
+PR-2F adds the discovery module so LAN + Tailscale clients can
+find the NAS without manual IP / DNS configuration. The endpoint
+sits at `GET /api/discovery/info` and is intentionally **open**
+(no `JwtAuthGuard`) because clients need to find the NAS BEFORE
+they have a bearer token — see
+[`openspec/changes/alejandria-v2/specs/nas-discovery-auth/spec.md`](../openspec/changes/alejandria-v2/specs/nas-discovery-auth/spec.md).
+
+```
+GET /api/discovery/info
+  → 200 {
+      mdns_name:    'alejandria-nas.local',
+      port:         3000,
+      tailscale_ip: '100.64.0.5' | null,
+      lan_ips:      ['192.168.1.50', ...]
+    }
+```
+
+| Field          | Source                                                   |
+|----------------|----------------------------------------------------------|
+| `mdns_name`    | Bonjour responder published by `MdnsService` (`_alejandria._tcp`). |
+| `port`         | `PORT` env var (default 3000).                           |
+| `tailscale_ip` | `tailscale ip -4` shelled out by `TailscaleService`; `null` when `tailscale` is missing / `tailscaled` is down. |
+| `lan_ips`      | Every non-loopback IPv4 from `os.networkInterfaces()`.  |
+
+### mDNS publish (`MdnsService`)
+
+`MdnsService.onModuleInit` opens a Bonjour responder and
+publishes `_alejandria._tcp` on the HTTP port using the host's
+first LAN IPv4. The underlying `bonjour` npm package is injected
+via the `BONJOUR` string token so e2e tests stub it out — the
+test runner never opens a real mDNS responder. Publish errors
+(no Avahi / Bonjour on the host) are swallowed so the rest of
+the API keeps booting; the discovery endpoint then reports the
+LAN IPs as the fallback.
+
+### Tailscale probe (`TailscaleService`)
+
+`TailscaleService.getIp` shells out to `tailscale ip -4` via
+`child_process.execFile` (no shell interpreter, fixed command).
+The probe returns:
+
+- the trimmed stdout when the CLI exits 0,
+- `null` when the binary is missing (exit 127), the daemon is
+  down (exit 1), stdout is empty, or the call throws / times out.
+
+The subprocess call is injected via the `TAILSCALE_SHELL`
+string token so the unit + e2e suites cover both states without
+spawning a real process on the runner.
+
+### Module map addition
+
+| Module            | Controller routes              | Services                              | Tokens                                          |
+|-------------------|--------------------------------|---------------------------------------|------------------------------------------------|
+| `DiscoveryModule` | `GET /api/discovery/info`      | `DiscoveryService`, `MdnsService`, `TailscaleService` | `MDNS_NAME`, `LAN_IPS`, `NAS_HTTP_PORT`, `MDNS_SERVICE_NAME`, `MDNS_SERVICE_PORT`, `MDNS_SERVICE_HOST`, `BONJOUR`, `TAILSCALE_SHELL` |
+
+All tokens are namespaced `NAS_*` so they cannot collide with
+anything the other modules inject. The same string-token pattern
+is used by `HealthModule` (`DATABASE_PING`, `REDIS_PING`) and
+`WorkersModule` (`BULLMQ_CONNECTION`).
 
 ## Migrations
 
