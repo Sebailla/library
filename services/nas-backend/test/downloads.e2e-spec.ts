@@ -374,7 +374,6 @@ describe('POST /api/downloads', () => {
         .set('Authorization', `Bearer ${token}`)
         .send({
           book_id: book.id,
-          device_name: 'iPad de Seba',
           file_size_bytes: 1024,
         })
         .expect(201);
@@ -394,13 +393,24 @@ describe('POST /api/downloads', () => {
         title: 'Dune',
         filePath: '/lib/dune.epub',
       });
-      const token = await pairAndGetToken(app);
+      // Single pairing so the bearer device matches the row's
+      // device. After the IDOR fix (#42) the device_name comes
+      // from the paired device row, NOT from the request body.
+      const pair = await request(app.getHttpServer())
+        .post('/api/auth/pair')
+        .send({ pin: '12345678', device_name: 'iPad de Seba' })
+        .expect(201);
+      const token = pair.body.token as string;
+      const me = await request(app.getHttpServer())
+        .get('/api/me')
+        .set('Authorization', `Bearer ${token}`)
+        .expect(200);
+      const expectedDeviceName = me.body.device_name as string;
       const res = await request(app.getHttpServer())
         .post('/api/downloads')
         .set('Authorization', `Bearer ${token}`)
         .send({
           book_id: book.id,
-          device_name: 'iPad',
           file_size_bytes: 4096,
         })
         .expect(201);
@@ -411,7 +421,7 @@ describe('POST /api/downloads', () => {
       expect(stored?.completed).toBe(false);
       expect(stored?.bytesTransferred).toBe(0);
       expect(stored?.fileSizeBytes).toBe(4096);
-      expect(stored?.deviceName).toBe('iPad');
+      expect(stored?.deviceName).toBe(expectedDeviceName);
     } finally {
       await app.close();
     }
@@ -424,17 +434,21 @@ describe('POST /api/downloads', () => {
         title: 'Solaris',
         filePath: '/lib/solaris.pdf',
       });
-      const token = await pairAndGetToken(app);
-      const deviceId = '11111111-1111-1111-1111-111111111111';
+      const pair = await request(app.getHttpServer())
+        .post('/api/auth/pair')
+        .send({ pin: '12345678', device_name: 'iPad' })
+        .expect(201);
+      const token = pair.body.token as string;
+      const bearerDeviceId = pair.body.device_id as string;
 
-      // First attempt — creates a fresh row.
+      // First attempt — creates a fresh row attributed to the
+      // bearer device (4R #42: server derives device_id from
+      // req.device).
       const first = await request(app.getHttpServer())
         .post('/api/downloads')
         .set('Authorization', `Bearer ${token}`)
         .send({
           book_id: book.id,
-          device_id: deviceId,
-          device_name: 'iPad',
           file_size_bytes: 2048,
         })
         .expect(201);
@@ -450,8 +464,6 @@ describe('POST /api/downloads', () => {
         .set('Authorization', `Bearer ${token}`)
         .send({
           book_id: book.id,
-          device_id: deviceId,
-          device_name: 'iPad',
           file_size_bytes: 2048,
         })
         .expect(201);
@@ -459,9 +471,9 @@ describe('POST /api/downloads', () => {
       expect(second.body.resume_supported).toBe(true);
 
       // No duplicate row created.
-      const allForBook = (await downloads.listByDevice(deviceId)).filter(
-        (d) => d.bookId === book.id,
-      );
+      const allForBook = (
+        await downloads.listByDevice(bearerDeviceId)
+      ).filter((d) => d.bookId === book.id);
       expect(allForBook).toHaveLength(1);
     } finally {
       await app.close();
@@ -475,16 +487,17 @@ describe('POST /api/downloads', () => {
         title: 'El amor en los tiempos del cólera',
         filePath: '/lib/amor.epub',
       });
-      const token = await pairAndGetToken(app);
-      const deviceId = '22222222-2222-2222-2222-222222222222';
+      const pair = await request(app.getHttpServer())
+        .post('/api/auth/pair')
+        .send({ pin: '12345678', device_name: 'iPad' })
+        .expect(201);
+      const token = pair.body.token as string;
 
       const first = await request(app.getHttpServer())
         .post('/api/downloads')
         .set('Authorization', `Bearer ${token}`)
         .send({
           book_id: book.id,
-          device_id: deviceId,
-          device_name: 'iPad',
           file_size_bytes: 1024,
         })
         .expect(201);
@@ -494,8 +507,6 @@ describe('POST /api/downloads', () => {
         .set('Authorization', `Bearer ${token}`)
         .send({
           book_id: book.id,
-          device_id: deviceId,
-          device_name: 'iPad',
           file_size_bytes: 1024,
         })
         .expect(201);
@@ -603,7 +614,7 @@ describe('GET /api/downloads/stats', () => {
   });
 
   it('returns aggregated counts with top_books and top_devices', async () => {
-    const { app, books } = await buildApp();
+    const { app, books, downloads } = await buildApp();
     try {
       const book1 = await seedBook(books, {
         title: 'A',
@@ -618,47 +629,34 @@ describe('GET /api/downloads/stats', () => {
       const deviceB = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb';
 
       // 3 downloads for book1 (1 from deviceA, 2 from deviceB),
-      // 1 download for book2 (from deviceA).
-      await request(app.getHttpServer())
-        .post('/api/downloads')
-        .set('Authorization', `Bearer ${token}`)
-        .send({
-          book_id: book1.id,
-          device_id: deviceA,
-          device_name: 'A',
-          file_size_bytes: 10,
-        })
-        .expect(201);
-      await request(app.getHttpServer())
-        .post('/api/downloads')
-        .set('Authorization', `Bearer ${token}`)
-        .send({
-          book_id: book1.id,
-          device_id: deviceB,
-          device_name: 'B',
-          file_size_bytes: 10,
-        })
-        .expect(201);
-      await request(app.getHttpServer())
-        .post('/api/downloads')
-        .set('Authorization', `Bearer ${token}`)
-        .send({
-          book_id: book1.id,
-          device_id: deviceB,
-          device_name: 'B',
-          file_size_bytes: 10,
-        })
-        .expect(201);
-      await request(app.getHttpServer())
-        .post('/api/downloads')
-        .set('Authorization', `Bearer ${token}`)
-        .send({
-          book_id: book2.id,
-          device_id: deviceA,
-          device_name: 'A',
-          file_size_bytes: 10,
-        })
-        .expect(201);
+      // 1 download for book2 (from deviceA). 4R #42 — the server
+      // no longer accepts device_id in the body, so we inject
+      // these rows directly through the in-memory repository.
+      // This still exercises the same stats query path.
+      await downloads.insert({
+        bookId: book1.id,
+        deviceId: deviceA,
+        deviceName: 'A',
+        fileSizeBytes: 10,
+      });
+      await downloads.insert({
+        bookId: book1.id,
+        deviceId: deviceB,
+        deviceName: 'B',
+        fileSizeBytes: 10,
+      });
+      await downloads.insert({
+        bookId: book1.id,
+        deviceId: deviceB,
+        deviceName: 'B',
+        fileSizeBytes: 10,
+      });
+      await downloads.insert({
+        bookId: book2.id,
+        deviceId: deviceA,
+        deviceName: 'A',
+        fileSizeBytes: 10,
+      });
 
       const res = await request(app.getHttpServer())
         .get('/api/downloads/stats')
@@ -701,71 +699,86 @@ describe('GET /api/downloads/by-device/:device_id', () => {
     restoreEnv();
   });
 
-  it('lists every download for the given device, newest first', async () => {
-    const { app, books } = await buildApp();
+  it('lists every download for the bearer device, newest first', async () => {
+    // 4R #42 — GET /by-device/:device_id now refuses when the
+    // path param does not match the bearer. The list is therefore
+    // ALWAYS the bearer's own downloads. We inject rows for the
+    // bearer (via HTTP) and rows for OTHER devices (via the repo
+    // directly) to confirm the bearer only sees their own.
+    const { app, books, downloads } = await buildApp();
     try {
       const book = await seedBook(books, {
         title: 'Borges',
         filePath: '/lib/borges.epub',
       });
-      const token = await pairAndGetToken(app);
-      const target = 'cccccccc-cccc-cccc-cccc-cccccccccccc';
+      const pair = await request(app.getHttpServer())
+        .post('/api/auth/pair')
+        .send({ pin: '12345678', device_name: 'Self' })
+        .expect(201);
+      const token = pair.body.token as string;
+      const bearerDeviceId = pair.body.device_id as string;
       const other = 'dddddddd-dddd-dddd-dddd-dddddddddddd';
 
+      // First bearer-owned download via HTTP.
       await request(app.getHttpServer())
         .post('/api/downloads')
         .set('Authorization', `Bearer ${token}`)
         .send({
           book_id: book.id,
-          device_id: target,
-          device_name: 'iPad',
           file_size_bytes: 100,
         })
         .expect(201);
       // Sleep one ms to guarantee an ordering gap on fast machines.
       await new Promise((r) => setTimeout(r, 5));
+      // Second bearer-owned download via HTTP.
       await request(app.getHttpServer())
         .post('/api/downloads')
         .set('Authorization', `Bearer ${token}`)
         .send({
           book_id: book.id,
-          device_id: target,
-          device_name: 'iPad',
           file_size_bytes: 200,
         })
         .expect(201);
-      await request(app.getHttpServer())
-        .post('/api/downloads')
-        .set('Authorization', `Bearer ${token}`)
-        .send({
-          book_id: book.id,
-          device_id: other,
-          device_name: 'Other',
-          file_size_bytes: 999,
-        })
-        .expect(201);
+      // A row belonging to a DIFFERENT device, injected via the
+      // repository (no HTTP path lets us create this anymore).
+      await downloads.insert({
+        bookId: book.id,
+        deviceId: other,
+        deviceName: 'Other',
+        fileSizeBytes: 999,
+      });
 
       const res = await request(app.getHttpServer())
-        .get(`/api/downloads/by-device/${target}`)
+        .get(`/api/downloads/by-device/${bearerDeviceId}`)
         .set('Authorization', `Bearer ${token}`)
         .expect(200);
       expect(res.body.data).toHaveLength(2);
       // Newest first — the second POST has a later ``downloaded_at``.
       expect(res.body.data[0].file_size_bytes).toBe(200);
       expect(res.body.data[1].file_size_bytes).toBe(100);
-      expect(res.body.data[0].device_id).toBe(target);
-      expect(res.body.data[1].device_id).toBe(target);
+      expect(res.body.data[0].device_id).toBe(bearerDeviceId);
+      expect(res.body.data[1].device_id).toBe(bearerDeviceId);
     } finally {
       await app.close();
     }
   });
 
-  it('returns 200 with empty data for an unknown device', async () => {
+  it('returns 200 with empty data for an unknown bearer device (still passes the IDOR check)', async () => {
+    // 4R #42 — the IDOR guard compares path param vs bearer; when
+    // they match the request is served (with whatever rows the
+    // bearer has — empty in this case). Pairing once means the
+    // bearer device is fixed; we ask for its own list which is
+    // empty.
     const { app } = await buildApp();
     try {
-      const token = await pairAndGetToken(app);
+      const pair = await request(app.getHttpServer())
+        .post('/api/auth/pair')
+        .send({ pin: '12345678', device_name: 'EmptyDevice' })
+        .expect(201);
+      const token = pair.body.token as string;
+      const bearerDeviceId = pair.body.device_id as string;
       const res = await request(app.getHttpServer())
-        .get('/api/downloads/by-device/eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee')
+        .get(`/api/downloads/by-device/${bearerDeviceId}`)
         .set('Authorization', `Bearer ${token}`)
         .expect(200);
       expect(res.body.data).toEqual([]);
@@ -812,14 +825,13 @@ describe('IDOR hardening for /api/downloads (4R review #42)', () => {
         title: 'Crime and Punishment',
         filePath: '/lib/crime.epub',
       });
-      const token = await pairAndGetToken(app);
-
-      // Pair returns the auto-assigned device_id; we need it
-      // back to confirm the row is attributed to the bearer.
+      // Single pairing: the bearer is the device the server
+      // MUST attribute the row to.
       const pair = await request(app.getHttpServer())
         .post('/api/auth/pair')
         .send({ pin: '12345678', device_name: 'SpoofAttempt' })
         .expect(201);
+      const token = pair.body.token as string;
       const attackerDeviceId = pair.body.device_id as string;
 
       const res = await request(app.getHttpServer())
@@ -836,7 +848,10 @@ describe('IDOR hardening for /api/downloads (4R review #42)', () => {
 
       const row = await downloads.findById(res.body.download_id as number);
       // The server MUST attribute the row to the bearer's device,
-      // NOT the spoofed body fields.
+      // NOT the spoofed body fields. The validation pipe's
+      // whitelist drops device_id/device_name/user_id from the
+      // DTO before the controller runs, so the controller's
+      // req.device is the only source of attribution.
       expect(row?.deviceId).toBe(attackerDeviceId);
       expect(row?.deviceId).not.toBe('00000000-0000-0000-0000-deadbeef0000');
       expect(row?.deviceName).toBe('SpoofAttempt');
@@ -854,12 +869,12 @@ describe('IDOR hardening for /api/downloads (4R review #42)', () => {
         filePath: '/lib/beloved.epub',
       });
 
-      // Pair device A → token A. Create a download row for A.
-      const tokenA = await pairAndGetToken(app);
+      // Pair device A → token A → create a download row for A.
       const pairA = await request(app.getHttpServer())
         .post('/api/auth/pair')
         .send({ pin: '12345678', device_name: 'DeviceA' })
         .expect(201);
+      const tokenA = pairA.body.token as string;
       const deviceA = pairA.body.device_id as string;
 
       const created = await request(app.getHttpServer())
@@ -870,7 +885,12 @@ describe('IDOR hardening for /api/downloads (4R review #42)', () => {
       const downloadId = created.body.download_id as number;
 
       // Pair device B → token B. Try to PATCH A's download.
-      const tokenB = await pairAndGetToken(app);
+      const pairB = await request(app.getHttpServer())
+        .post('/api/auth/pair')
+        .send({ pin: '12345678', device_name: 'DeviceB' })
+        .expect(201);
+      const tokenB = pairB.body.token as string;
+
       const res = await request(app.getHttpServer())
         .patch(`/api/downloads/${downloadId}`)
         .set('Authorization', `Bearer ${tokenB}`)

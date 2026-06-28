@@ -1,4 +1,9 @@
-import { Inject, Injectable, NotFoundException } from '@nestjs/common';
+import {
+  ForbiddenException,
+  Inject,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import {
   DOWNLOADS_REPOSITORY,
   Download,
@@ -49,10 +54,18 @@ export interface CreateDownloadInput {
   userAgent?: string | null;
 }
 
-/** Inputs to ``updateDownload``. */
+/**
+ * Inputs to ``updateDownload``.
+ *
+ * 4R review #42 — ``requestingDeviceId`` is the bearer device
+ * resolved by ``JwtAuthGuard``. The service compares it against
+ * ``existing.deviceId`` and refuses the update with
+ * ``FORBIDDEN`` when the row belongs to another device.
+ */
 export interface UpdateDownloadInput {
   completed: boolean;
   bytesTransferred: number;
+  requestingDeviceId: string;
 }
 
 /**
@@ -100,11 +113,17 @@ export class DownloadsService {
   }
 
   /**
-   * Update a download row. ``completed = true`` flips the
-   * ``completed`` flag and records the byte count; ``completed =
-   * false`` only updates the byte count (the row stays in
-   * progress). Throws ``NotFoundException`` when no row exists
-   * for the supplied id.
+   * Update a download row.
+   *
+   * 4R review #42 — IDOR: the row's ``deviceId`` MUST match the
+   * bearer's device. A mismatch raises ``FORBIDDEN`` and the
+   * repository is NOT touched. ``NOT_FOUND`` is still raised
+   * for a genuinely missing row so the wire shape stays
+   * informative for legitimate clients.
+   *
+   * ``completed = true`` flips the ``completed`` flag and records
+   * the byte count; ``completed = false`` only updates the byte
+   * count (the row stays in progress).
    */
   async updateDownload(
     id: number,
@@ -114,6 +133,14 @@ export class DownloadsService {
     if (!existing) {
       throw new NotFoundException({
         error: { code: 'NOT_FOUND', message: 'Download not found' },
+      });
+    }
+    if (existing.deviceId !== input.requestingDeviceId) {
+      throw new ForbiddenException({
+        error: {
+          code: 'FORBIDDEN',
+          message: 'Download belongs to a different device',
+        },
       });
     }
     if (input.completed) {

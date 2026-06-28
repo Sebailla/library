@@ -39,8 +39,17 @@ import { Response } from 'express';
  */
 export function buildValidationPipe(): ValidationPipe {
   return new ValidationPipe({
+    // ``whitelist: true`` strips every property that does NOT
+    // appear on the DTO. We deliberately do NOT enable
+    // ``forbidNonWhitelisted`` so a client that sends a stale
+    // field (e.g. the old ``device_id`` body field that 4R #42
+    // removed from POST /api/downloads) is gracefully
+    // backwards-compatible: the field is dropped on the floor
+    // rather than rejected, so a downgrade-then-upgrade client
+    // does not need to ship in lockstep with the server.
+    // Routes that care about strict whitelisting can opt in via
+    // a per-route ValidationPipe.
     whitelist: true,
-    forbidNonWhitelisted: true,
     transform: true,
     transformOptions: { enableImplicitConversion: true },
     stopAtFirstError: false,

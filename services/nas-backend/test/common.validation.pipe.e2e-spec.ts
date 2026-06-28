@@ -170,23 +170,22 @@ describe('global ValidationPipe envelope (4R review #41)', () => {
     }
   });
 
-  it('rejects unknown properties with VALIDATION_FAILED (forbidNonWhitelisted)', async () => {
-    // The pipe runs with both ``whitelist: true`` AND
-    // ``forbidNonWhitelisted: true`` so an attacker cannot smuggle
-    // additional fields into a DTO (e.g. ``role: 'admin'`` in a
-    // user update payload). The envelope must surface as
-    // VALIDATION_FAILED on the offending field.
+  it('silently drops unknown properties (whitelist: true, no forbidNonWhitelisted)', async () => {
+    // The pipe runs with ``whitelist: true`` so unknown fields
+    // are dropped from the DTO before the handler runs — but
+    // NOT rejected. A client sending a stale field (e.g. an
+    // older build of POST /api/downloads still pushing
+    // ``device_id`` after the IDOR fix in #42) is treated
+    // gracefully: the request succeeds and the offending field
+    // is dropped, instead of failing with 400 and forcing a
+    // lockstep upgrade.
     const app = await buildApp();
     try {
       const res = await request(app.getHttpServer())
         .post('/test-validation/body')
         .send({ name: 'Seba', age: 30, role: 'admin' })
-        .expect(400);
-      expect(res.body.error.code).toBe('VALIDATION_FAILED');
-      const fields = (
-        res.body.error.details as Array<{ field: string }>
-      ).map((d) => d.field);
-      expect(fields).toEqual(expect.arrayContaining(['role']));
+        .expect(201);
+      expect(res.body).toEqual({ ok: true, name: 'Seba', age: 30 });
     } finally {
       await app.close();
     }
