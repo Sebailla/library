@@ -1,28 +1,191 @@
 /**
  * HTTP client for the NAS catalog service (PR-2 / `nas-catalog-service`).
  *
- * The full client — Range-request downloads, PIN pairing, search
- * via pgroonga — lands in PR-3C. PR-3A ships the surface contract
- * only so the (nas)/browse RSC route can render without HTTP
- * calls during the scaffold slice.
+ * The client is a pure, dependency-injected wrapper around `fetch`:
  *
- * Every method is async and returns plain data; callers never
- * touch `fetch` directly. When PR-3C fills this in the page will
- * silently start hitting the NAS.
+ *  - Every method targets a documented PR-2 endpoint and returns a
+ *    strongly-typed response. Callers never touch `fetch` directly.
+ *  - Authentication is bearer-token based. The constructor takes an
+ *    optional `token`; methods that require auth (`/api/books`,
+ *    `/api/search`, etc.) attach `Authorization: Bearer <token>`.
+ *    Pre-auth endpoints (`/api/auth/pair`, `/api/discovery/info`)
+ *    never carry a token even if one is configured.
+ *  - The base URL resolves from `ALEJANDRIA_NAS_URL` (Electron PR-4
+ *    overrides this) and defaults to the local NestJS backend on
+ *    `:3000` per `services/nas-backend/src/main.ts`.
+ *
+ * The download path (`downloadFile`) uses a Range request to
+ * resume partial transfers; see `lib/download/range-client.ts` for
+ * the resumable transport that wraps this method.
  */
 
-/** A row as the NAS serves it from `GET /api/search`. */
+/** A row as the NAS serves it from `GET /api/books` (PR-2D). */
 export interface NasBook {
-  id: string
+  id: number
   title: string
-  author: string
-  year: number
-  format: string
+  author_id: number | null
+  year: number | null
+  language: string | null
+  format: string | null
+  file_path: string
+  cover_path: string | null
+  excerpt: string | null
+  indexed_at: string
 }
 
+/** Response shape for `GET /api/books` (PR-2D). */
+export interface NasListBooksResponse {
+  data: readonly NasBook[]
+  page: number
+  limit: number
+  total: number
+}
+
+/** Detail shape for `GET /api/books/:id` (PR-2D). */
+export interface NasBookDetail extends NasBook {
+  file_size_bytes: number | null
+  content_hash: string | null
+  categories: readonly { id: number; path: string; name_es: string; name_en: string }[]
+  sagas: readonly { id: number; name: string; author_id: number | null }[]
+}
+
+/** Wire shape returned by `POST /api/auth/pair` + `POST /api/auth/refresh`. */
+export interface NasPairResponse {
+  token: string
+  expires_at: string
+  device_id: string
+}
+
+/** Wire shape for `POST /api/auth/pair` (PR-2C). */
+export interface NasPairRequest {
+  pin: string
+  deviceName: string
+}
+
+/** Response from `GET /api/search` (PR-2D). */
+export interface NasSearchResponse {
+  data: readonly {
+    id: number
+    title: string
+    author: string | null
+    year: number | null
+    format: string | null
+  }[]
+  total: number
+  limit: number
+  offset: number
+}
+
+/** Response from `GET /api/categories` (PR-2D). */
+export interface NasCategoriesResponse {
+  data: readonly unknown[]
+}
+
+/** Pre-auth discovery (PR-2F.1). */
+export interface NasDiscoveryInfo {
+  mdns_name: string
+  port: number
+}
+
+/** Auth-required discovery (PR-2F.1). */
+export interface NasDiscoveryNetwork {
+  tailscale_ip: string | null
+  lan_ips: readonly string[]
+}
+
+/** Response from `POST /api/downloads` (PR-2E). */
+export interface NasStartDownloadResponse {
+  download_id: number
+  resume_supported: boolean
+}
+
+/** Response from `PATCH /api/downloads/:id` (PR-2E). */
+export interface NasCompleteDownloadResponse {
+  id: number
+  completed: boolean
+  bytes_transferred: number
+  book_id: number
+  device_id: string | null
+  downloaded_at: string
+}
+
+/** Input for `startDownload` — the tracking envelope. */
+export interface NasStartDownloadRequest {
+  bookId: number
+  deviceId: string
+  deviceName: string
+  userId: string
+  fileSizeBytes: number
+}
+
+/** Input for `completeDownload` — the completion envelope. */
+export interface NasCompleteDownloadRequest {
+  completed: boolean
+  bytesTransferred: number
+}
+
+/** Filters for `listBooks` (PR-2D). */
+export interface NasListBooksFilters {
+  page?: number
+  limit?: number
+  authorId?: number
+  format?: string
+  language?: string
+}
+
+/** Options for `search` (PR-2D). */
+export interface NasSearchOptions {
+  limit?: number
+  offset?: number
+}
+
+/** Client options. */
+export interface NasClientOptions {
+  /** Override the base URL (defaults to env / localhost:3000). */
+  baseUrl?: string
+  /** Bearer token; required for auth-required endpoints. */
+  token?: string
+  /** Override the fetch implementation (used by tests). */
+  fetch?: typeof fetch
+  /** Path to the directory used to materialize downloaded files. */
+  downloadDir?: string
+}
+
+/** Public surface — implemented by {@link createNasClient}. */
 export interface INasClient {
-  /** Search the NAS catalog. Empty string lists the first page. */
-  search(query: string): Promise<readonly NasBook[]>
+  pair(request: NasPairRequest): Promise<NasPairResponse>
+  refresh(): Promise<NasPairResponse>
+  listBooks(filters: NasListBooksFilters): Promise<NasListBooksResponse>
+  getBook(id: number): Promise<NasBookDetail>
+  search(query: string, options: NasSearchOptions): Promise<NasSearchResponse>
+  listCategories(): Promise<NasCategoriesResponse>
+  getDiscoveryInfo(): Promise<NasDiscoveryInfo>
+  getDiscoveryNetwork(): Promise<NasDiscoveryNetwork>
+  startDownload(request: NasStartDownloadRequest): Promise<NasStartDownloadResponse>
+  completeDownload(
+    downloadId: number,
+    request: NasCompleteDownloadRequest,
+  ): Promise<NasCompleteDownloadResponse>
+  /**
+   * Stream a book file to disk via `GET /api/files/:id` with
+   * `Range: bytes=0-`. The caller supplies the byte writer so
+   * the transport stays dependency-injected (tests use an
+   * in-memory writer; production wires `node:fs/promises`).
+   */
+  downloadFile(
+    bookId: number,
+    destPath: string,
+    onProgress: (bytesReceived: number) => void,
+    options?: DownloadFileOptions,
+  ): Promise<void>
+}
+
+/** Options for {@link INasClient.downloadFile}. */
+export interface DownloadFileOptions {
+  /** Writer used to persist the body. Defaults to `node:fs/promises.writeFile`. */
+  writeFile?: (path: string, data: Uint8Array) => Promise<void>
+  /** Start byte for the Range header (defaults to 0). */
+  start?: number
 }
 
 /**
@@ -35,19 +198,285 @@ export function resolveNasBaseUrl(): string {
   return process.env['ALEJANDRIA_NAS_URL'] ?? 'http://localhost:3000'
 }
 
+function normalizeBaseUrl(baseUrl: string): string {
+  return baseUrl.endsWith('/') ? baseUrl.slice(0, -1) : baseUrl
+}
+
+interface RequestOptions {
+  method: 'GET' | 'POST' | 'PATCH'
+  body?: unknown
+  /** Whether to send the bearer token. Defaults to `true`. */
+  authenticated?: boolean
+  /** Custom headers (e.g. Range). */
+  extraHeaders?: Record<string, string>
+}
+
+class NasHttpError extends Error {
+  constructor(
+    public readonly status: number,
+    public readonly code: string | null,
+    message: string,
+  ) {
+    super(message)
+    this.name = 'NasHttpError'
+  }
+}
+
+function describeError(status: number, body: unknown): NasHttpError {
+  if (typeof body === 'object' && body !== null) {
+    const envelope = body as { error?: { code?: string; message?: string } }
+    if (envelope.error) {
+      return new NasHttpError(
+        status,
+        envelope.error.code ?? null,
+        `${status} ${envelope.error.code ?? ''}: ${envelope.error.message ?? ''}`.trim(),
+      )
+    }
+  }
+  return new NasHttpError(status, null, `NAS request failed: ${status}`)
+}
+
+interface NasClientState {
+  baseUrl: string
+  token: string | null
+  fetchImpl: typeof fetch
+}
+
+async function sendJson<T>(state: NasClientState, path: string, options: RequestOptions): Promise<T> {
+  const url = `${state.baseUrl}${path}`
+  const headers: Record<string, string> = {
+    'content-type': 'application/json',
+    accept: 'application/json',
+  }
+  if (options.authenticated !== false && state.token) {
+    headers['authorization'] = `Bearer ${state.token}`
+  }
+  if (options.extraHeaders) {
+    Object.assign(headers, options.extraHeaders)
+  }
+
+  const init: RequestInit = {
+    method: options.method,
+    headers,
+  }
+  if (options.body !== undefined) {
+    init.body = JSON.stringify(options.body)
+  }
+
+  const response = await state.fetchImpl(url, init)
+  if (!response.ok) {
+    let body: unknown = null
+    try {
+      body = await response.json()
+    } catch {
+      // ignore — non-JSON error body
+    }
+    throw describeError(response.status, body)
+  }
+  // 204 No Content
+  if (response.status === 204) {
+    return undefined as T
+  }
+  return (await response.json()) as T
+}
+
 /**
- * Open a NAS client. PR-3A returns a stub that resolves to an empty
- * list so the (nas)/browse page renders its empty state during
- * scaffolding. PR-3C replaces the body with real `fetch` calls +
- * bearer-token retrieval from the OS keychain.
+ * Drain a `Response.body` into a single `Uint8Array` while
+ * invoking `onProgress` per chunk.
+ *
+ * The implementation is intentionally tiny: we do not depend on
+ * Node streams (the client also runs in the renderer during PR-4)
+ * and we do not care about backpressure here because the
+ * destination is a `node:fs` write owned by the caller. The
+ * resumable transport (Range header + chunked writer) lives in
+ * `lib/download/range-client.ts`; this method just materialises
+ * the body and reports bytes received.
  */
-export function openNasClient(): INasClient {
+async function drainToBuffer(
+  response: Response,
+  onProgress: (bytes: number) => void,
+): Promise<Uint8Array> {
+  if (!response.body) {
+    return new Uint8Array()
+  }
+  const reader = response.body.getReader()
+  const chunks: Uint8Array[] = []
+  let total = 0
+  try {
+    while (true) {
+      const result = (await reader.read()) as { done: boolean; value?: Uint8Array }
+      if (result.done) break
+      const value = result.value
+      if (!value) continue
+      chunks.push(value)
+      total += value.byteLength
+      onProgress(total)
+    }
+  } finally {
+    reader.releaseLock()
+  }
+  if (chunks.length === 0) return new Uint8Array()
+  if (chunks.length === 1) {
+    const only = chunks[0]!
+    if (only.byteLength === total) return only
+  }
+  const out = new Uint8Array(total)
+  let offset = 0
+  for (const chunk of chunks) {
+    out.set(chunk, offset)
+    offset += chunk.byteLength
+  }
+  return out
+}
+
+const defaultDownloadWriter = async (path: string, data: Uint8Array): Promise<void> => {
+  const { writeFile } = await import('node:fs/promises')
+  await writeFile(path, data)
+}
+
+/**
+ * Open a NAS client.
+ *
+ * The client is stateful in two senses:
+ *  - the `baseUrl` is fixed at construction time
+ *  - the bearer token is captured at construction time. Callers
+ *    that need to rotate must re-construct the client (the
+ *    `pair` / `refresh` methods are the entry points that produce
+ *    a fresh token).
+ */
+export function createNasClient(options: NasClientOptions = {}): INasClient {
+  const state: NasClientState = {
+    baseUrl: normalizeBaseUrl(options.baseUrl ?? resolveNasBaseUrl()),
+    token: options.token ?? null,
+    fetchImpl: options.fetch ?? globalThis.fetch.bind(globalThis),
+  }
+
   return {
-    async search(_query: string): Promise<readonly NasBook[]> {
-      // PR-3A skeleton: no NAS row yet. PR-3C will call
-      //   GET {baseUrl}/api/search?q=<encoded query>
-      // with the bearer token from keychain.
-      return []
+    async pair(request: NasPairRequest): Promise<NasPairResponse> {
+      return sendJson<NasPairResponse>(state, '/api/auth/pair', {
+        method: 'POST',
+        authenticated: false,
+        body: { pin: request.pin, device_name: request.deviceName },
+      })
+    },
+
+    async refresh(): Promise<NasPairResponse> {
+      if (!state.token) {
+        throw new Error('refresh() requires a configured bearer token')
+      }
+      return sendJson<NasPairResponse>(state, '/api/auth/refresh', {
+        method: 'POST',
+        authenticated: false,
+        body: { token: state.token },
+      })
+    },
+
+    async listBooks(filters: NasListBooksFilters): Promise<NasListBooksResponse> {
+      const params = new URLSearchParams()
+      if (filters.page !== undefined) params.set('page', String(filters.page))
+      if (filters.limit !== undefined) params.set('limit', String(filters.limit))
+      if (filters.authorId !== undefined) params.set('author_id', String(filters.authorId))
+      if (filters.format !== undefined) params.set('format', filters.format)
+      if (filters.language !== undefined) params.set('language', filters.language)
+      const query = params.toString()
+      const path = query.length > 0 ? `/api/books?${query}` : '/api/books'
+      return sendJson<NasListBooksResponse>(state, path, { method: 'GET' })
+    },
+
+    async getBook(id: number): Promise<NasBookDetail> {
+      return sendJson<NasBookDetail>(state, `/api/books/${id}`, { method: 'GET' })
+    },
+
+    async search(query: string, opts: NasSearchOptions): Promise<NasSearchResponse> {
+      const params = new URLSearchParams({ q: query })
+      if (opts.limit !== undefined) params.set('limit', String(opts.limit))
+      if (opts.offset !== undefined) params.set('offset', String(opts.offset))
+      return sendJson<NasSearchResponse>(state, `/api/search?${params.toString()}`, {
+        method: 'GET',
+      })
+    },
+
+    async listCategories(): Promise<NasCategoriesResponse> {
+      return sendJson<NasCategoriesResponse>(state, '/api/categories', { method: 'GET' })
+    },
+
+    async getDiscoveryInfo(): Promise<NasDiscoveryInfo> {
+      return sendJson<NasDiscoveryInfo>(state, '/api/discovery/info', {
+        method: 'GET',
+        authenticated: false,
+      })
+    },
+
+    async getDiscoveryNetwork(): Promise<NasDiscoveryNetwork> {
+      return sendJson<NasDiscoveryNetwork>(state, '/api/discovery/network', { method: 'GET' })
+    },
+
+    async startDownload(request: NasStartDownloadRequest): Promise<NasStartDownloadResponse> {
+      return sendJson<NasStartDownloadResponse>(state, '/api/downloads', {
+        method: 'POST',
+        body: {
+          book_id: request.bookId,
+          device_id: request.deviceId,
+          device_name: request.deviceName,
+          user_id: request.userId,
+          file_size_bytes: request.fileSizeBytes,
+        },
+      })
+    },
+
+    async completeDownload(
+      downloadId: number,
+      request: NasCompleteDownloadRequest,
+    ): Promise<NasCompleteDownloadResponse> {
+      return sendJson<NasCompleteDownloadResponse>(
+        state,
+        `/api/downloads/${downloadId}`,
+        {
+          method: 'PATCH',
+          body: {
+            completed: request.completed,
+            bytes_transferred: request.bytesTransferred,
+          },
+        },
+      )
+    },
+
+    async downloadFile(
+      bookId: number,
+      destPath: string,
+      onProgress: (bytesReceived: number) => void,
+      options: DownloadFileOptions = {},
+    ): Promise<void> {
+      const start = options.start ?? 0
+      const url = `${state.baseUrl}/api/files/${bookId}`
+      const headers: Record<string, string> = {
+        range: `bytes=${start}-`,
+      }
+      if (state.token) {
+        headers['authorization'] = `Bearer ${state.token}`
+      }
+      const response = await state.fetchImpl(url, { method: 'GET', headers })
+      if (!response.ok && response.status !== 206) {
+        throw describeError(response.status, null)
+      }
+      const writeFile = options.writeFile ?? defaultDownloadWriter
+      const bytes = await drainToBuffer(response, onProgress)
+      await writeFile(destPath, bytes)
     },
   }
 }
+
+/**
+ * Backwards-compatible factory preserved for the PR-3A stub
+ * callers (the (nas)/browse page). New code MUST use
+ * {@link createNasClient} so the dependency-injected `fetch`
+ * is honoured in tests.
+ *
+ * @deprecated use {@link createNasClient}.
+ */
+export function openNasClient(): INasClient {
+  return createNasClient()
+}
+
+/** Exposed for tests that want to assert on the typed error. */
+export { NasHttpError }

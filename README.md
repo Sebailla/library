@@ -26,17 +26,18 @@ biblioteca-v2/
 | PR1 | Python sidecar (`services/extractors-py/`) | Merged |
 | PR2 | NAS NestJS backend (`services/nas-backend/`) | Merged |
 | PR-3A | Next.js 16 scaffold + RSC catalog browse (`apps/web/`) | Merged |
-| PR-3B | Real local SQLite + FTS5 + scan pipeline + PDF reader (`apps/web/`) | **This PR** |
-| PR-3C | NAS client with Range-request download (`apps/web/lib/api/`) | Pending |
+| PR-3B | Real local SQLite + FTS5 + scan pipeline + PDF reader (`apps/web/`) | Merged |
+| PR-3C | NAS client + Range-request download + server actions + pdfjs (`apps/web/`) | **This PR** |
 | PR4 | Electron shell + iCloud Drive + 7-layer ISBN | Pending |
 
-## Running `apps/web/` (PR-3B)
+## Running `apps/web/` (PR-3C)
 
 The web app is the Next.js 16 + React 19 shell. It serves the local
-library catalog at `/`, the NAS browse shell at `/browse`, and the
-new reader at `/reader/[bookId]`. The catalog and NAS browse routes
-are React Server Components with the `'use cache'` directive required
-by the `nextjs-app-shell` spec; the reader is a Client Component so
+library catalog at `/`, the NAS browse shell at `/browse`, the
+reader at `/reader/[bookId]`, and a "Pair with NAS" CTA on the
+home page. The catalog and NAS browse routes are React Server
+Components with the `'use cache'` directive required by the
+`nextjs-app-shell` spec; the reader is a Client Component so
 `pdfjs-dist` can lazy-load in the browser only.
 
 ```bash
@@ -61,9 +62,103 @@ npm run dev    # http://localhost:3001
 
 | Path | Component | Notes |
 |------|-----------|-------|
-| `/` | `app/(catalog)/page.tsx` | RSC. Reads `lib/db/local-db.ts` (real `better-sqlite3` + FTS5 in PR-3B). Cached for 1h with `cacheTag('local-library')`. |
-| `/browse` | `app/(nas)/browse/page.tsx` | RSC. Reads `lib/api/nas-client.ts` (empty list in PR-3B — real fetch + Range-request download land in PR-3C). Cached for 1h with `cacheTag('nas-catalog')`. |
+| `/` | `app/(catalog)/page.tsx` | RSC. Reads `lib/db/local-db.ts`. Cached for 1h with `cacheTag('local-library')`. Renders a "Pair with NAS" form (PR-3C) so the user can mint a bearer token. |
+| `/browse` | `app/(nas)/browse/page.tsx` | RSC. Reads `lib/api/nas-client.ts` via `GET /api/books`. Cached for 1h with `cacheTag('nas-catalog')`. Renders an empty list when the NAS is offline. |
 | `/reader/[bookId]` | `app/reader/[bookId]/page.tsx` | Client Component. Mounts `<Reader />` with `<ProgressBar />` and a lazy-loaded `<PdfViewer />` (`pdfjs-dist` via `next/dynamic({ ssr:false })`). |
+
+### NAS client (PR-3C)
+
+`lib/api/nas-client.ts` ships a dependency-injected `fetch` HTTP
+client that implements the full PR-2 wire surface. Every method
+returns a strongly-typed response; callers never touch `fetch`
+directly.
+
+| Method | Endpoint | Auth |
+|--------|----------|------|
+| `pair({ pin, deviceName })` | `POST /api/auth/pair` | Public |
+| `refresh()` | `POST /api/auth/refresh` | Public (sends current token) |
+| `listBooks({ page, limit, authorId, format, language })` | `GET /api/books` | Bearer |
+| `getBook(id)` | `GET /api/books/:id` | Bearer |
+| `search(q, { limit, offset })` | `GET /api/search` | Bearer |
+| `listCategories()` | `GET /api/categories` | Bearer |
+| `getDiscoveryInfo()` | `GET /api/discovery/info` | Public |
+| `getDiscoveryNetwork()` | `GET /api/discovery/network` | Bearer |
+| `startDownload({ bookId, deviceId, deviceName, userId, fileSizeBytes })` | `POST /api/downloads` | Bearer |
+| `completeDownload(id, { completed, bytesTransferred })` | `PATCH /api/downloads/:id` | Bearer |
+| `downloadFile(bookId, destPath, onProgress, options?)` | `GET /api/files/:id` (Range) | Bearer |
+
+Construction:
+
+```ts
+import { createNasClient } from '@/lib/api/nas-client'
+
+const client = createNasClient({
+  baseUrl: process.env.ALEJANDRIA_NAS_URL, // optional, defaults to http://localhost:3000
+  token: '<jwt>',                          // optional, set after pair/refresh
+  fetch: globalThis.fetch,                 // optional, defaults to global fetch
+})
+```
+
+### Download flow (PR-3C)
+
+`lib/download/download-flow.ts` orchestrates the NAS-side of a
+book download:
+
+1. `INasClient.getBook` — resolve metadata
+2. `INasClient.startDownload` — open the tracking row
+3. `INasClient.downloadFile` — stream the bytes with `Range: bytes=0-`
+4. `openLocalDb().insertBook` — persist the row so the reader can find it
+5. `INasClient.completeDownload` — close the tracking row
+
+```ts
+import { createNasClient } from '@/lib/api/nas-client'
+import { downloadBook } from '@/lib/download/download-flow'
+
+const client = createNasClient({ token: '<jwt>' })
+const result = await downloadBook({
+  bookId: 7,
+  deviceId: 'web-uuid',
+  deviceName: 'web-MacBook Pro',
+  userId: 'self',
+  destPath: '/path/to/ficciones.pdf',
+  nasClient: client,
+})
+```
+
+The resumable Range transport lives in
+`lib/download/range-client.ts` (`downloadWithRange(url, destPath,
+fetchImpl, options)`). It accepts 200 OK (no Range support) and
+206 Partial Content, fires a per-chunk `onProgress` callback, and
+returns the total bytes written.
+
+### Server Actions (PR-3C)
+
+`app/_actions/nas-actions.ts` exposes thin Server Actions the
+RSC pages call from `<form action={…}>`:
+
+| Action | What it does |
+|--------|--------------|
+| `pairDevice(formData)` | Reads `pin` + `deviceName`; returns a `Result<NasPairResponse, ErrorMessage>`. |
+| `refreshToken(formData)` | Reads `token`; returns a `Result<NasPairResponse, ErrorMessage>`. |
+| `downloadFromNas(formData)` | Reads `bookId` + device attribution; runs `downloadBook`; returns a `Result<DownloadBookResult, ErrorMessage>`. |
+| `scanLocalFolder(formData)` | Reads `filePath`; runs `scanFile`; returns a `Result<BookRow, ErrorMessage>`. |
+
+All four return a discriminated union so the calling page renders
+errors without `try/catch` noise.
+
+### PDF viewer (PR-3C)
+
+`components/PdfViewer.tsx` lazy-loads `pdfjs-dist`, configures
+the worker via `URL(new URL(..., import.meta.url))`, and renders
+the current page to a `<canvas>`. The component exposes:
+
+- `currentPage` — controlled page number
+- `onPageChange(page)` — fired by the prev/next buttons
+- `onError(error)` — fired on render rejection so the parent can
+  surface a fallback UI
+
+The Reader wires `onPageChange` to a local `currentPage` state
+and the route's persistence layer.
 
 ### Local SQLite
 
@@ -98,20 +193,23 @@ into the local SQLite. The spawn step is injected via
 | Var | Default | Used by |
 |-----|---------|---------|
 | `ALEJANDRIA_DATA_DIR` | `<cwd>/data` | `lib/db/local-db.ts` — location of the single `library.sqlite` file. |
-| `ALEJANDRIA_NAS_URL` | `http://localhost:3000` | `lib/api/nas-client.ts` — NAS backend base URL. PR-3B keeps the empty stub; PR-3C adds real fetch. |
+| `ALEJANDRIA_NAS_URL` | `http://localhost:3000` | `lib/api/nas-client.ts` — NAS backend base URL. |
 
-### What's stubbed in PR-3B
+### What's stubbed in PR-3C
 
-- `lib/api/nas-client.ts` returns an empty list; no HTTP call is
-  made to the NAS (PR-3C adds the real client).
-- The NAS browse page always renders the "Connect to NAS" prompt
-  because no device token exists yet (PR-3C adds the PIN pairing
-  flow).
-- The PDF surface is a placeholder; the real `pdfjs-dist`
-  integration (worker source, page render loop, canvas allocation)
-  ships in PR-3E.
-- The EPUB reader (`epub-reader` spec) ships as a `cfi-wrapper`
-  scaffold only; the full implementation follows.
+- The NAS browse page renders an empty list when the backend is
+  unreachable (offline dev). The `try/catch` is intentional so
+  the route does not break the build.
+- The "Pair with NAS" form displays the device id on success but
+  does not yet persist the JWT to a cookie. PR-3E wires
+  `cookies()` + redirect.
+- The `downloadFromNas` action writes the file to
+  `<cwd>/data/books/<id>.bin`. The destination path will move
+  to `app.getPath('userData')` once the Electron shell lands.
+- The `author` field on locally-persisted NAS rows is a
+  placeholder (`author:<id>`) because the NAS detail payload
+  only exposes `author_id`. A follow-up PR joins against
+  `/api/authors/:id` for the display name.
 
 ### Stack details
 
@@ -121,7 +219,8 @@ into the local SQLite. The spawn step is injected via
 - TypeScript **5.5** in strict mode (`noUncheckedIndexedAccess`,
   `noImplicitOverride`, `noFallthroughCasesInSwitch`).
 - Vitest **2.1** + Testing Library **16** + jsdom for component
-  tests.
+  tests. `vitest.config.ts` aliases `@/*` to the project root so
+  the tests can import the same paths the source uses.
 - ESLint via `eslint-config-next`.
 
 ## See also

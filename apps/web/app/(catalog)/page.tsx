@@ -2,6 +2,7 @@ import { cacheLife, cacheTag } from 'next/cache'
 
 import { BookList } from '@/components/BookList'
 import { openLocalDb } from '@/lib/db/local-db'
+import { PairWithNasForm } from './PairWithNasForm'
 
 /**
  * Reads the local library. PR-3A skeleton returns an empty list;
@@ -34,6 +35,10 @@ async function loadCatalog(): Promise<readonly { id: string; title: string; auth
  * When the local DB is empty (PR-3A) the page renders the empty
  * state intentionally rather than a spinner — there is genuinely
  * nothing to show.
+ *
+ * PR-3C adds a "Pair with NAS" CTA so the user can mint a bearer
+ * token and start downloading. The form is a Server Action —
+ * no JS roundtrip is needed to submit it.
  */
 export default async function CatalogPage(): Promise<React.JSX.Element> {
   const books = await loadCatalog()
@@ -41,6 +46,7 @@ export default async function CatalogPage(): Promise<React.JSX.Element> {
   return (
     <main>
       <h1>My Library</h1>
+      <PairWithNasForm />
       {books.length === 0 ? (
         <p data-testid="catalog-empty">
           Your library is empty. Scan a folder or download a book from the NAS.
