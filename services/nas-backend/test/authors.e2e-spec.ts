@@ -1,10 +1,11 @@
 import { Test, TestingModule } from '@nestjs/testing';
-import { INestApplication, ValidationPipe } from '@nestjs/common';
+import { INestApplication } from '@nestjs/common';
 import request from 'supertest';
 import { AppModule } from '../src/app.module';
 import { DEVICES_REPOSITORY } from '../src/auth/devices.repository';
 import { AUTHORS_REPOSITORY } from '../src/authors/authors.repository';
 import { BOOKS_REPOSITORY } from '../src/books/books.repository';
+import { buildValidationPipe } from '../src/common/validation.pipe';
 
 /**
  * End-to-end contract tests for the author browsing routes shipped in
@@ -184,7 +185,7 @@ async function buildApp(opts: {
     .useValue(books)
     .compile();
   const app = moduleRef.createNestApplication();
-  app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }));
+  app.useGlobalPipes(buildValidationPipe());
   await app.init();
   return { app, authors, books };
 }

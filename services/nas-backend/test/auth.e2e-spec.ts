@@ -1,8 +1,9 @@
 import { Test, TestingModule } from '@nestjs/testing';
-import { INestApplication, ValidationPipe } from '@nestjs/common';
+import { INestApplication } from '@nestjs/common';
 import request from 'supertest';
 import { AppModule } from '../src/app.module';
 import { DEVICES_REPOSITORY } from '../src/auth/devices.repository';
+import { buildValidationPipe } from '../src/common/validation.pipe';
 
 /**
  * End-to-end contract tests for the auth pair + refresh endpoints
@@ -122,7 +123,7 @@ async function buildApp(opts: {
     .useValue(devices)
     .compile();
   const app = moduleRef.createNestApplication();
-  app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }));
+  app.useGlobalPipes(buildValidationPipe());
   await app.init();
   return { app, devices };
 }
@@ -152,7 +153,7 @@ async function tryBuildAppWithoutSecret(): Promise<{
       .useValue(devices)
       .compile();
     const app = moduleRef.createNestApplication();
-    app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }));
+    app.useGlobalPipes(buildValidationPipe());
     await app.init();
     return { ok: true, app, devices };
   } catch (err) {

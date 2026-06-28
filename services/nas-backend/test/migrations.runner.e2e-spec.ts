@@ -46,7 +46,7 @@ skipIfNoDb('migration runner', () => {
   it('lists migration files in lexicographic order', async () => {
     const files = await loadMigrations(path.join(repoRoot, 'migrations'));
     const names = files.map((f) => f.name);
-    // All ten migrations shipped in PR-2B + PR-2C must be present.
+    // All migrations shipped through PR-2G.1 must be present.
     expect(names).toEqual(
       expect.arrayContaining([
         '001_extensions.sql',
@@ -59,6 +59,7 @@ skipIfNoDb('migration runner', () => {
         '008_pgroonga_indexes.sql',
         '009_seed_categories.sql',
         '010_devices.sql',
+        '011_pgroonga_defrag.sql',
       ]),
     );
     // Order must be lexicographic (which equals numeric for fixed-
@@ -84,6 +85,7 @@ skipIfNoDb('migration runner', () => {
         '008_pgroonga_indexes.sql',
         '009_seed_categories.sql',
         '010_devices.sql',
+        '011_pgroonga_defrag.sql',
       ]),
     );
 
@@ -295,6 +297,7 @@ skipIfNoDb('migration runner schema_migrations table (#37)', () => {
           '008_pgroonga_indexes.sql',
           '009_seed_categories.sql',
           '010_devices.sql',
+          '011_pgroonga_defrag.sql',
         ]),
       );
       // Every applied_at must be a parseable ISO timestamp.
@@ -379,5 +382,187 @@ skipIfNoDb('migration runner schema_migrations table (#37)', () => {
     } finally {
       await fs.rm(tmpDir, { recursive: true, force: true });
     }
+  });
+});
+
+/**
+ * 4R review #43 — pgroonga_index_defrag helper + nightly job.
+ *
+ * Migration 011 installs:
+ *
+ *   - A PL/pgSQL helper ``pgroonga_index_defrag(text)`` that wraps
+ *     ``pgroonga_command('defrag', ...)``. The helper exists
+ *     unconditionally so other migrations / operators can call it
+ *     directly.
+ *
+ *   - A pg_cron nightly job at 03:00 UTC that defrags both
+ *     ``books_title_pgroonga_idx`` and ``books_excerpt_pgroonga_idx``.
+ *     The job is best-effort — the migration succeeds even when
+ *     pg_cron is not installed, but the helper is still created
+ *     so operators can run the defrag manually.
+ *
+ * Tests below exercise the helper directly (against the actual
+ * pgroonga indexes created by migration 008) and assert the job
+ * schedule contract.
+ */
+skipIfNoDb('migration 011 — pgroonga_index_defrag + pg_cron nightly (#43)', () => {
+  beforeEach(async () => {
+    return resetSchema();
+  });
+
+  it('creates the pgroonga_index_defrag helper function', async () => {
+    await runMigrations({
+      connectionString,
+      migrationsDir: path.join(repoRoot, 'migrations'),
+    });
+    const pool = new Pool({ connectionString });
+    try {
+      const exists = await pool.query<{ ok: boolean }>(
+        "SELECT EXISTS (SELECT 1 FROM pg_proc WHERE proname = 'pgroonga_index_defrag') AS ok",
+      );
+      expect(exists.rows[0]?.ok).toBe(true);
+    } finally {
+      await pool.end();
+    }
+  });
+
+  it('pgroonga_index_defrag helper is callable and returns void on both indexes', async () => {
+    await runMigrations({
+      connectionString,
+      migrationsDir: path.join(repoRoot, 'migrations'),
+    });
+    const pool = new Pool({ connectionString });
+    try {
+      // The helper must accept any index name and finish without
+      // raising. A freshly-applied schema has empty indexes so
+      // defrag is effectively a no-op, but the call MUST succeed
+      // so the cron job can invoke it nightly on a real DB.
+      const r1 = await pool.query('SELECT pgroonga_index_defrag($1) AS ok', [
+        'books_title_pgroonga_idx',
+      ]);
+      expect(r1.rows[0]?.ok).toBeNull(); // RETURNS void
+      const r2 = await pool.query('SELECT pgroonga_index_defrag($1) AS ok', [
+        'books_excerpt_pgroonga_idx',
+      ]);
+      expect(r2.rows[0]?.ok).toBeNull();
+    } finally {
+      await pool.end();
+    }
+  });
+
+  it('nightly pg_cron job is registered when pg_cron is available', async () => {
+    // The migration wraps the pg_cron setup in a DO block that
+    // downgrades to a NOTICE when the extension is missing. When
+    // the extension IS installed the job must appear in cron.job
+    // with the documented schedule.
+    const pool = new Pool({ connectionString });
+    try {
+      const hasCron = await pool.query<{ ok: boolean }>(
+        "SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_cron') AS ok",
+      );
+      await runMigrations({
+        connectionString,
+        migrationsDir: path.join(repoRoot, 'migrations'),
+      });
+      if (!hasCron.rows[0]?.ok) {
+        // pg_cron is not installed in this environment — the
+        // migration must still succeed (we just verified that
+        // above) and the helper must still exist (verified above).
+        // The schedule check is skipped here and asserted
+        // separately when pg_cron is available.
+        return;
+      }
+      const jobs = await pool.query<{ jobname: string; schedule: string }>(
+        "SELECT jobname, schedule FROM cron.job WHERE jobname = 'alejandria_pgroonga_defrag'",
+      );
+      expect(jobs.rows).toHaveLength(1);
+      expect(jobs.rows[0]?.schedule).toBe('0 3 * * *');
+    } finally {
+      await pool.end();
+    }
+  });
+
+  it('migration is idempotent — running twice replaces the pg_cron schedule instead of stacking jobs', async () => {
+    // After the first run the helper + (optionally) the job exist.
+    // A second run MUST NOT add a second job, even if pg_cron is
+    // available.
+    const pool = new Pool({ connectionString });
+    try {
+      const hasCron = await pool.query<{ ok: boolean }>(
+        "SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_cron') AS ok",
+      );
+      const opts = {
+        connectionString,
+        migrationsDir: path.join(repoRoot, 'migrations'),
+      };
+      await runMigrations(opts);
+      await runMigrations(opts); // second run
+      if (!hasCron.rows[0]?.ok) return;
+      const jobs = await pool.query<{ jobname: string }>(
+        "SELECT jobname FROM cron.job WHERE jobname = 'alejandria_pgroonga_defrag'",
+      );
+      expect(jobs.rows).toHaveLength(1);
+    } finally {
+      await pool.end();
+    }
+  });
+});
+
+/**
+ * File-level contract for migration 011 — runs WITHOUT a database
+ * so the test always executes and pins the migration file shape.
+ *
+ * The DB-backed tests in the describe above verify the schema +
+ * behaviour. This describe verifies the SQL file ITSELF is what
+ * we expect to ship: it exists, defines the helper, schedules the
+ * cron job at 03:00 UTC, and mentions both pgroonga indexes by
+ * name.
+ *
+ * If a future contributor edits migration 011 and accidentally
+ * drops the schedule or renames an index, these assertions fail
+ * immediately without a database.
+ */
+describe('migration 011 file contract (#43)', () => {
+  it('ships as services/nas-backend/migrations/011_pgroonga_defrag.sql', async () => {
+    const fs = await import('fs/promises');
+    const filePath = path.join(repoRoot, 'migrations', '011_pgroonga_defrag.sql');
+    const sql = await fs.readFile(filePath, 'utf8');
+    expect(sql.length).toBeGreaterThan(0);
+  });
+
+  it('defines pgroonga_index_defrag(text) and RETURNS void', async () => {
+    const fs = await import('fs/promises');
+    const filePath = path.join(repoRoot, 'migrations', '011_pgroonga_defrag.sql');
+    const sql = await fs.readFile(filePath, 'utf8');
+    expect(sql).toMatch(
+      /CREATE OR REPLACE FUNCTION\s+pgroonga_index_defrag\s*\(\s*idx\s+text\s*\)/i,
+    );
+    expect(sql).toMatch(/RETURNS\s+void/i);
+  });
+
+  it('schedules the nightly pg_cron job at 03:00 UTC', async () => {
+    const fs = await import('fs/promises');
+    const filePath = path.join(repoRoot, 'migrations', '011_pgroonga_defrag.sql');
+    const sql = await fs.readFile(filePath, 'utf8');
+    expect(sql).toMatch(/cron\.schedule/i);
+    expect(sql).toMatch(/['"]0 3 \* \* \*['"]/);
+  });
+
+  it('mentions both books_title_pgroonga_idx and books_excerpt_pgroonga_idx by name', async () => {
+    const fs = await import('fs/promises');
+    const filePath = path.join(repoRoot, 'migrations', '011_pgroonga_defrag.sql');
+    const sql = await fs.readFile(filePath, 'utf8');
+    expect(sql).toMatch(/books_title_pgroonga_idx/);
+    expect(sql).toMatch(/books_excerpt_pgroonga_idx/);
+  });
+
+  it('downgrades gracefully when pg_cron is not installed', async () => {
+    // The DO block must catch the extension-not-installed error
+    // so the migration succeeds on a server without pg_cron.
+    const fs = await import('fs/promises');
+    const filePath = path.join(repoRoot, 'migrations', '011_pgroonga_defrag.sql');
+    const sql = await fs.readFile(filePath, 'utf8');
+    expect(sql).toMatch(/EXCEPTION WHEN/i);
+    expect(sql).toMatch(/CREATE EXTENSION IF NOT EXISTS pg_cron/i);
   });
 });

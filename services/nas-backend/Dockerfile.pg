@@ -1,0 +1,41 @@
+# Dockerfile.pg — pgroonga + pg_cron on top of Debian Postgres 16.
+#
+# Used by docker-compose.yml as the build context for the
+# ``postgres`` service so the nightly ``alejandria_pgroonga_defrag``
+# pg_cron job (migration 011, 4R review #43) can be installed at
+# ``CREATE EXTENSION`` time. Without this overlay the migration
+# 011 DO block downgrades to a NOTICE and operators must install
+# pg_cron + schedule the job manually — see the README ops
+# runbook for that fallback.
+#
+# Build:
+#   docker build -f Dockerfile.pg -t alejandria-postgres:pgroonga-pgcron .
+#
+# This image is OPTIONAL — the bare ``groonga/pgroonga:latest``
+# image still works; defrag just becomes a manual one-shot.
+
+FROM groonga/pgroonga:latest-debian-16
+
+# pg_cron ships in the official PostgreSQL apt repo. Install it
+# and a couple of helpers we use in the entrypoint.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      postgresql-16-cron \
+      ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+# pg_cron requires ``shared_preload_libraries='pg_cron'`` plus a
+# ``cron.database_name`` GUC telling it which database to use.
+# Append to the existing config rather than overwriting it so the
+# pgroonga GUCs set by the base image stay intact.
+RUN { \
+      echo ""; \
+      echo "# pg_cron (added by Dockerfile.pg — 4R review #43)"; \
+      echo "shared_preload_libraries = 'pg_cron'"; \
+      echo "cron.database_name = 'alejandria'"; \
+    } >> /usr/share/postgresql/16/postgresql.conf.sample
+
+# pgroonga's base image ships its own entrypoint; reuse it so the
+# image behaves identically to the upstream ``groonga/pgroonga``
+# container (initdb, pg_ctl, healthcheck).
+CMD ["postgres"]
