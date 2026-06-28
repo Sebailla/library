@@ -349,7 +349,7 @@ skipIfNoDb('migration runner schema_migrations table (#37)', () => {
       );
       await fs.writeFile(
         path.join(tmpDir, '002_broken.sql'),
-        'CREATE TABLE this_does_not_exist_due_to_typo (id INT);\n',
+        'ALTER TABLE does_not_exist_yet ADD COLUMN broken INT;\n',
       );
       await runMigrations({
         connectionString,
