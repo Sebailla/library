@@ -1,46 +1,46 @@
-'use client'
+import { Suspense } from 'react'
+import { cacheLife, cacheTag } from 'next/cache'
 
-import { use } from 'react'
-
-import { Reader } from '@/components/Reader'
 import { openLocalDb } from '@/lib/db/local-db'
+import { Reader } from '@/components/Reader'
 
 /**
  * Reader route — `/reader/[bookId]` (PR-3B).
  *
- * Per `book-reader` spec this is a Client Component because the
- * reader depends on `pdfjs-dist`, which is loaded lazily via
- * `next/dynamic({ ssr:false })` and therefore requires the browser
- * runtime.
+ * Per `book-reader` + `pdf-reader` specs the route must:
+ *  - resolve the `bookId` from `params` (Next.js 15+ async params)
+ *  - look the book up in the local SQLite (sync `better-sqlite3`)
+ *  - mount the Client `<Reader />` so `pdfjs-dist` can lazy-load
  *
- * In Next.js 15+ the `params` object is asynchronous. `React.use()`
- * unwraps the promise without making the surrounding component
- * async, which is what we want here — the Reader is itself a
- * Client Component and this page is the route shell.
+ * The page itself stays a Server Component so the DB read uses
+ * `node:fs` + `better-sqlite3` without polluting the client bundle.
+ * The Reader child is the only Client boundary; that keeps the
+ * chunk that ships to the browser free of Node built-ins.
  *
- * The DB lookup is synchronous (`better-sqlite3`), so it runs in
- * the server pass before the Client Component boundary is crossed
- * in production. Under vitest, the page can be mounted with mocked
- * data via `<Reader book={…} />` directly; the route is exercised
- * end-to-end by the Playwright suite in PR-3E.
+ * The DB read is wrapped in `'use cache'` per the `nextjs-app-shell`
+ * spec — the tag is per-book so PR-3E (when it wires annotation
+ * saves) can call `revalidateTag('book:<id>')` to bust the cache
+ * after the user closes the reader.
+ *
+ * The full EPUB implementation lands alongside the EPUB reader PR;
+ * the `cfi-wrapper` scaffold (`lib/reader/cfi-wrapper.ts`) is the
+ * versioned contract downstream readers depend on.
  */
+
 type RouteParams = { bookId: string }
 
-export default function ReaderPage({
-  params,
-}: {
-  params: Promise<RouteParams>
-}): React.JSX.Element {
-  const { bookId } = use(params)
+async function loadReader(bookId: string): Promise<React.JSX.Element> {
+  'use cache'
+  cacheLife('hours')
+  cacheTag(`book:${bookId}`)
 
-  // Resolve the book synchronously from the local DB. PR-3C will
-  // fall back to the NAS when the row is missing locally.
   const db = openLocalDb()
-  let book = db.findById(bookId)
+  let book = null
   let currentPage = 1
   let totalPages = 1
 
   try {
+    book = db.findById(bookId)
     if (book) {
       const progress = db.getProgress(bookId)
       if (progress) {
@@ -67,4 +67,25 @@ export default function ReaderPage({
   }
 
   return <Reader book={book} currentPage={currentPage} totalPages={totalPages} />
+}
+
+async function ReaderView({
+  params,
+}: {
+  params: Promise<RouteParams>
+}): Promise<React.JSX.Element> {
+  const { bookId } = await params
+  return loadReader(bookId)
+}
+
+export default function ReaderPage({
+  params,
+}: {
+  params: Promise<RouteParams>
+}): React.JSX.Element {
+  return (
+    <Suspense fallback={<main><p>Loading reader…</p></main>}>
+      <ReaderView params={params} />
+    </Suspense>
+  )
 }
