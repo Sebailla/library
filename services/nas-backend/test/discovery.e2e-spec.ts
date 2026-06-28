@@ -124,12 +124,12 @@ async function buildApp(overrides: {
   return app;
 }
 
-describe('GET /api/discovery/info', () => {
+describe('GET /api/discovery/info (pre-auth)', () => {
   afterEach(() => {
     restoreEnv();
   });
 
-  it('returns 200 with mdns_name, port, tailscale_ip and lan_ips when Tailscale is up', async () => {
+  it('returns 200 with only mdns_name and port — no IPs', async () => {
     const app = await buildApp({
       mdnsName: 'alejandria-nas.local',
       port: 3000,
@@ -140,50 +140,14 @@ describe('GET /api/discovery/info', () => {
       const res = await request(app.getHttpServer())
         .get('/api/discovery/info')
         .expect(200);
+      // Pre-auth surface MUST NOT leak tailscale_ip or lan_ips —
+      // those are network-internal and gated behind /api/discovery/network.
       expect(res.body).toEqual({
         mdns_name: 'alejandria-nas.local',
         port: 3000,
-        tailscale_ip: '100.64.0.5',
-        lan_ips: ['192.168.1.50', '192.168.1.51'],
       });
-    } finally {
-      await app.close();
-    }
-  });
-
-  it('returns tailscale_ip: null when Tailscale is not running', async () => {
-    const app = await buildApp({
-      mdnsName: 'alejandria-nas.local',
-      port: 3000,
-      tailscaleIp: null,
-      lanIps: ['192.168.1.50'],
-    });
-    try {
-      const res = await request(app.getHttpServer())
-        .get('/api/discovery/info')
-        .expect(200);
-      expect(res.body.tailscale_ip).toBeNull();
-      expect(res.body.mdns_name).toBe('alejandria-nas.local');
-      expect(res.body.port).toBe(3000);
-      expect(res.body.lan_ips).toEqual(['192.168.1.50']);
-    } finally {
-      await app.close();
-    }
-  });
-
-  it('returns an empty lan_ips array when the host has no non-loopback interfaces', async () => {
-    const app = await buildApp({
-      mdnsName: 'alejandria-nas.local',
-      port: 8080,
-      tailscaleIp: '100.64.0.5',
-      lanIps: [],
-    });
-    try {
-      const res = await request(app.getHttpServer())
-        .get('/api/discovery/info')
-        .expect(200);
-      expect(res.body.port).toBe(8080);
-      expect(res.body.lan_ips).toEqual([]);
+      expect(res.body).not.toHaveProperty('tailscale_ip');
+      expect(res.body).not.toHaveProperty('lan_ips');
     } finally {
       await app.close();
     }
@@ -202,6 +166,111 @@ describe('GET /api/discovery/info', () => {
       await request(app.getHttpServer())
         .get('/api/discovery/info')
         .expect(200);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('does not require or honor a Bearer token', async () => {
+    // Even with a Bearer token, the response MUST stay the same —
+    // /info is the pre-auth surface.
+    const app = await buildApp({
+      mdnsName: 'alejandria-nas.local',
+      port: 3000,
+      tailscaleIp: '100.64.0.5',
+      lanIps: ['192.168.1.50'],
+    });
+    try {
+      const res = await request(app.getHttpServer())
+        .get('/api/discovery/info')
+        .set('Authorization', 'Bearer any.value.here')
+        .expect(200);
+      expect(res.body).toEqual({
+        mdns_name: 'alejandria-nas.local',
+        port: 3000,
+      });
+    } finally {
+      await app.close();
+    }
+  });
+});
+
+describe('GET /api/discovery/network (auth-required)', () => {
+  afterEach(() => {
+    restoreEnv();
+  });
+
+  it('returns 401 without a Bearer token', async () => {
+    const app = await buildApp({
+      mdnsName: 'alejandria-nas.local',
+      port: 3000,
+      tailscaleIp: '100.64.0.5',
+      lanIps: ['192.168.1.50'],
+    });
+    try {
+      const res = await request(app.getHttpServer())
+        .get('/api/discovery/network')
+        .expect(401);
+      expect(res.body.error).toMatchObject({ code: 'UNAUTHORIZED' });
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('returns 200 with tailscale_ip and lan_ips when given a valid Bearer', async () => {
+    const app = await buildApp({
+      mdnsName: 'alejandria-nas.local',
+      port: 3000,
+      tailscaleIp: '100.64.0.5',
+      lanIps: ['192.168.1.50', '192.168.1.51'],
+    });
+    try {
+      // Mint a real token via /api/auth/pair so the JWT guard
+      // accepts it.
+      const pair = await request(app.getHttpServer())
+        .post('/api/auth/pair')
+        .send({ pin: '12345678', device_name: 'iPad' })
+        .expect(201);
+      const token = pair.body.token as string;
+
+      const res = await request(app.getHttpServer())
+        .get('/api/discovery/network')
+        .set('Authorization', `Bearer ${token}`)
+        .expect(200);
+      expect(res.body).toEqual({
+        tailscale_ip: '100.64.0.5',
+        lan_ips: ['192.168.1.50', '192.168.1.51'],
+      });
+      // Must not leak the pre-auth surface.
+      expect(res.body).not.toHaveProperty('mdns_name');
+      expect(res.body).not.toHaveProperty('port');
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('returns tailscale_ip: null and an empty lan_ips when Tailscale is down and the host has no LAN interfaces', async () => {
+    const app = await buildApp({
+      mdnsName: 'alejandria-nas.local',
+      port: 3000,
+      tailscaleIp: null,
+      lanIps: [],
+    });
+    try {
+      const pair = await request(app.getHttpServer())
+        .post('/api/auth/pair')
+        .send({ pin: '12345678', device_name: 'iPad' })
+        .expect(201);
+      const token = pair.body.token as string;
+
+      const res = await request(app.getHttpServer())
+        .get('/api/discovery/network')
+        .set('Authorization', `Bearer ${token}`)
+        .expect(200);
+      expect(res.body).toEqual({
+        tailscale_ip: null,
+        lan_ips: [],
+      });
     } finally {
       await app.close();
     }
