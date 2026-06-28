@@ -249,3 +249,135 @@ skipIfNoDb('migration runner', () => {
     await expect(runMigrations(opts)).resolves.toBeDefined();
   });
 });
+
+/**
+ * Resilience contract — 4R review #37.
+ *
+ * The migration runner now owns a ``schema_migrations`` table
+ * that records every applied file. A re-run MUST short-circuit
+ * already-applied files instead of re-executing them.
+ *
+ * The contract this commit establishes:
+ *
+ *   - After a fresh run, the ``schema_migrations`` table contains
+ *     a row for every ``*.sql`` file the runner processed.
+ *   - A second run adds zero new rows and reports every file
+ *     as ``skipped`` (no ``applied`` rows for files already in
+ *     the table).
+ *   - Inserting a row + executing the migration happens inside
+ *     the SAME transaction so a failed migration leaves no row.
+ */
+skipIfNoDb('migration runner schema_migrations table (#37)', () => {
+  beforeEach(async () => {
+    return resetSchema();
+  });
+
+  it('records every applied file in schema_migrations', async () => {
+    await runMigrations({
+      connectionString,
+      migrationsDir: path.join(repoRoot, 'migrations'),
+    });
+    const pool = new Pool({ connectionString });
+    try {
+      const rows = await pool.query<{ filename: string; applied_at: string }>(
+        'SELECT filename, applied_at FROM schema_migrations ORDER BY filename',
+      );
+      const filenames = rows.rows.map((r) => r.filename);
+      expect(filenames).toEqual(
+        expect.arrayContaining([
+          '001_extensions.sql',
+          '002_authors.sql',
+          '003_books.sql',
+          '004_categories.sql',
+          '005_book_categories.sql',
+          '006_sagas.sql',
+          '007_downloads.sql',
+          '008_pgroonga_indexes.sql',
+          '009_seed_categories.sql',
+          '010_devices.sql',
+        ]),
+      );
+      // Every applied_at must be a parseable ISO timestamp.
+      for (const row of rows.rows) {
+        expect(() => new Date(row.applied_at).toISOString()).not.toThrow();
+      }
+    } finally {
+      await pool.end();
+    }
+  });
+
+  it('skips already-applied files on a second run (no new rows)', async () => {
+    const opts = {
+      connectionString,
+      migrationsDir: path.join(repoRoot, 'migrations'),
+    };
+    const first = await runMigrations(opts);
+    expect(first.applied.length).toBeGreaterThan(0);
+
+    const second = await runMigrations(opts);
+    // No new applied files: every previously-applied file is skipped.
+    expect(second.applied).toEqual([]);
+    // Every previously-applied file appears in ``skipped``.
+    expect(second.skipped.length).toBe(first.applied.length);
+
+    // The schema_migrations table count is unchanged.
+    const pool = new Pool({ connectionString });
+    try {
+      const count = await pool.query<{ count: string }>(
+        'SELECT COUNT(*)::text AS count FROM schema_migrations',
+      );
+      expect(Number(count.rows[0].count)).toBe(first.applied.length);
+    } finally {
+      await pool.end();
+    }
+  });
+
+  it('rolls back the schema_migrations insert when a migration fails', async () => {
+    // Write a deliberately-broken migration into a temp dir; the
+    // runner MUST NOT leave a row in schema_migrations for the
+    // failed file (so re-running after the operator fixes the
+    // file actually re-applies it).
+    const fs = await import('fs/promises');
+    const os = await import('os');
+    const tmpDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'alejandria-mig-'),
+    );
+    try {
+      await fs.writeFile(
+        path.join(tmpDir, '001_extensions.sql'),
+        await fs.readFile(path.join(repoRoot, 'migrations/001_extensions.sql'), 'utf8'),
+      );
+      await fs.writeFile(
+        path.join(tmpDir, '002_broken.sql'),
+        'CREATE TABLE this_does_not_exist_due_to_typo (id INT);\n',
+      );
+      await runMigrations({
+        connectionString,
+        migrationsDir: tmpDir,
+      }).then(
+        () => {
+          throw new Error('expected migration to fail');
+        },
+        () => {
+          /* expected */
+        },
+      );
+
+      // Only the first file should be recorded; the broken second
+      // file's row MUST have been rolled back.
+      const pool = new Pool({ connectionString });
+      try {
+        const rows = await pool.query<{ filename: string }>(
+          'SELECT filename FROM schema_migrations ORDER BY filename',
+        );
+        expect(rows.rows.map((r) => r.filename)).toEqual([
+          '001_extensions.sql',
+        ]);
+      } finally {
+        await pool.end();
+      }
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+});
