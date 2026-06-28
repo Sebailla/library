@@ -20,6 +20,7 @@ import {
   TAILSCALE_SHELL,
   TailscaleService,
 } from './tailscale.service';
+import { AuthModule } from '../auth/auth.module';
 
 /**
  * Discovery module — ``GET /api/discovery/info`` (PR-2F).
@@ -81,6 +82,12 @@ function firstLanIpOrDefault(): string {
 }
 
 @Module({
+  // ``AuthModule`` is imported (not just listed in providers)
+  // because ``DiscoveryController`` injects ``JwtAuthGuard`` via
+  // ``@UseGuards`` on ``GET /api/discovery/network`` (#44). The
+  // guard itself is exported by ``AuthModule`` so the import
+  // resolves it without re-declaring it here.
+  imports: [AuthModule],
   controllers: [DiscoveryController],
   providers: [
     DiscoveryService,
