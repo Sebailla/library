@@ -120,6 +120,39 @@ async function buildApp(opts: {
   return { app, devices };
 }
 
+/**
+ * Build a module WITHOUT setting a NAS_JWT_SECRET — used by the
+ * security fail-fast tests below. The caller is responsible for
+ * ensuring the env var is unset (we strip it explicitly so a
+ * CI default value cannot mask the bug under test).
+ */
+async function tryBuildAppWithoutSecret(): Promise<{
+  ok: true;
+  app: INestApplication;
+  devices: InMemoryDevicesRepository;
+} | {
+  ok: false;
+  err: unknown;
+}> {
+  // Strip the secret so the auth module sees an unset env var.
+  delete process.env.NAS_JWT_SECRET;
+  const devices = new InMemoryDevicesRepository();
+  try {
+    const moduleRef: TestingModule = await Test.createTestingModule({
+      imports: [AppModule],
+    })
+      .overrideProvider(DEVICES_REPOSITORY)
+      .useValue(devices)
+      .compile();
+    const app = moduleRef.createNestApplication();
+    app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }));
+    await app.init();
+    return { ok: true, app, devices };
+  } catch (err) {
+    return { ok: false, err };
+  }
+}
+
 describe('POST /api/auth/pair', () => {
   afterEach(() => {
     restoreEnv();
@@ -256,5 +289,65 @@ describe('POST /api/auth/refresh', () => {
     } finally {
       await app.close();
     }
+  });
+});
+
+/**
+ * Security contract tests for the auth module (#32, 4R review
+ * blockers).
+ *
+ * The auth module MUST refuse to start when:
+ *
+ *   - ``NAS_JWT_SECRET`` is unset (no silent fallback to a public
+ *     literal).
+ *   - ``NAS_PAIR_PIN`` is unset or shorter than 8 characters.
+ *
+ * Boot-time validation is the only safe place for these checks —
+ * a runtime check would let the API answer pair requests with the
+ * default credentials and only fail later, which is exactly the
+ * exposure this issue closes.
+ */
+describe('Auth module — boot-time security validation', () => {
+  afterEach(() => {
+    restoreEnv();
+  });
+
+  it('refuses to start when NAS_JWT_SECRET is unset', async () => {
+    // Make sure the secret is genuinely missing — the existing
+    // ``restoreEnv`` only restores keys that were present at module
+    // load, so we also clear the env var explicitly.
+    delete process.env.NAS_JWT_SECRET;
+    process.env.NODE_ENV = 'production';
+    const result = await tryBuildAppWithoutSecret();
+    if (result.ok) {
+      await result.app.close();
+    }
+    expect(result.ok).toBe(false);
+    if (result.ok) return; // narrow for TS
+    const message =
+      result.err instanceof Error ? result.err.message : String(result.err);
+    // The error must reference the missing env var so the operator
+    // knows exactly what to fix.
+    expect(message).toMatch(/NAS_JWT_SECRET/);
+    delete process.env.NODE_ENV;
+  });
+
+  it('refuses to start when NAS_JWT_SECRET is shorter than 32 bytes', async () => {
+    setEnv({
+      NAS_JWT_SECRET: 'too-short',
+      NODE_ENV: 'production',
+    });
+    let threw = false;
+    let message = '';
+    try {
+      const { app } = await buildApp();
+      await app.close();
+    } catch (err) {
+      threw = true;
+      message = err instanceof Error ? err.message : String(err);
+    }
+    expect(threw).toBe(true);
+    expect(message).toMatch(/NAS_JWT_SECRET/);
+    delete process.env.NODE_ENV;
   });
 });
