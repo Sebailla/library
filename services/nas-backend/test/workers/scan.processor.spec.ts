@@ -1,4 +1,4 @@
-import { spawn, ChildProcess } from 'child_process';
+import { spawn, ChildProcess, SpawnOptions } from 'child_process';
 import { EventEmitter } from 'events';
 import { Readable } from 'stream';
 import { ScanProcessor, SidecarEnvelope } from '../../src/workers/scan.processor';
@@ -46,7 +46,7 @@ function makeFakeChild(
 type SpawnFn = (
   command: string,
   args: readonly string[],
-  options?: { stdio?: 'pipe' | 'ignore' },
+  options?: SpawnOptions,
 ) => ChildProcess;
 
 /** Helper to coerce the test fakes into a ``ChildProcess`` for the API. */
