@@ -6,6 +6,7 @@ import {
   OnModuleInit,
   Optional,
 } from '@nestjs/common';
+import { EventEmitter } from 'events';
 import bonjour, { Bonjour, Service } from 'bonjour';
 
 /**
@@ -74,15 +75,17 @@ export type BonjourFactory = () => BonjourLike;
  */
 export const defaultBonjourFactory: BonjourFactory = () => {
   const instance: Bonjour = bonjour();
-  // The published ``Bonjour`` type is missing ``EventEmitter``
-  // methods in its d.ts; the underlying instance is in fact an
-  // EventEmitter (the npm package inherits from one). Cast to the
-  // structural shape we need for the error-listener delegation.
-  const emitter = instance as unknown as {
-    on(event: 'error', listener: (err: Error) => void): unknown;
-    off(event: 'error', listener: (err: Error) => void): unknown;
-    removeAllListeners(event?: string): unknown;
-  };
+  // The ``Bonjour`` type is just an interface with no
+  // ``EventEmitter`` methods; the underlying instance keeps the
+  // raw ``multicast-dns`` handle on ``_server.mdns``. That
+  // handle is the actual EventEmitter that emits ``'error'``
+  // asynchronously when UDP bind fails (the surface that 4R
+  // review #36 mandates we listen on). The ``Bonjour`` instance
+  // does NOT re-emit those errors itself, so attaching the
+  // listener here would silently miss every failure.
+  const emitter = (instance as unknown as {
+    _server?: { mdns?: EventEmitter };
+  })._server?.mdns;
   const wrapper: BonjourLike = {
     publish(opts) {
       const svc: Service = instance.publish({
@@ -100,12 +103,15 @@ export const defaultBonjourFactory: BonjourFactory = () => {
       instance.destroy();
     },
     on(event, listener) {
+      if (!emitter) return undefined;
       return emitter.on(event, listener);
     },
     off(event, listener) {
+      if (!emitter) return undefined;
       return emitter.off(event, listener);
     },
     removeAllListeners(event) {
+      if (!emitter) return undefined;
       return emitter.removeAllListeners(event);
     },
   };
