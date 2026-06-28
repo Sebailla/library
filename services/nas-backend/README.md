@@ -154,8 +154,21 @@ Coverage:
 | `POST /api/auth/pair` invalid PIN | `401` `error.code = BAD_PIN` |
 | `POST /api/auth/pair` expired PIN TTL | `401` `error.code = PIN_EXPIRED` |
 | `POST /api/auth/pair` persists device row | SHA-256 token_hash stored under returned `device_id` |
+| `POST /api/auth/pair` rate-limited (5/min/IP) | 6th attempt within a minute returns `429` `error.code = THROTTLED` |
 | `POST /api/auth/refresh` valid token | `201` new token differs from previous |
 | `POST /api/auth/refresh` invalidates old token | old token returns `401` on `/api/me` after rotation |
+| `POST /api/auth/refresh` rate-limited (10/min/IP) | 11th attempt within a minute returns `429` `error.code = THROTTLED` |
+| `GET /api/discovery/info` pre-auth shape | `200` `{ mdns_name, port }` — no IPs leaked |
+| `GET /api/discovery/info` rate-limited (60/min/IP) | 61st request within a minute returns `429` `error.code = THROTTLED` |
+| `GET /api/discovery/network` no Bearer | `401` `error.code = UNAUTHORIZED` |
+| `GET /api/discovery/network` valid Bearer | `200` `{ tailscale_ip, lan_ips }` |
+| `ScanProcessor` rejects paths containing `..` | `SidecarError.code = INVALID_PATH`, no spawn |
+| `ScanProcessor` rejects absolute paths outside `NAS_LIBRARY_ROOT` | `SidecarError.code = INVALID_PATH`, no spawn |
+| `ScanProcessor` rejects paths starting with `-` (argv injection) | `SidecarError.code = INVALID_PATH`, no spawn |
+| Auth module — `NAS_JWT_SECRET` unset | boot fails with `Error: NAS_JWT_SECRET is required…` |
+| Auth module — `NAS_JWT_SECRET` < 32 bytes | boot fails with `Error: NAS_JWT_SECRET must be at least 32 bytes…` |
+| Auth module — `NAS_PAIR_PIN` unset | boot fails with `Error: NAS_PAIR_PIN is required…` |
+| Auth module — `NAS_PAIR_PIN` < 8 chars | boot fails with `Error: NAS_PAIR_PIN must be at least 8 characters…` |
 | `GET /api/me` no Bearer | `401` `error.code = UNAUTHORIZED` |
 | `GET /api/me` valid Bearer | `200` `{device_id, device_name}` |
 | `GET /api/me` tampered Bearer | `401` `error.code = TOKEN_INVALID` |
@@ -163,20 +176,28 @@ Coverage:
 
 ## Environment variables
 
-| Name | Default | Notes |
-|------|---------|-------|
-| `PORT` | `3000` | HTTP listener port |
-| `DATABASE_URL` | `postgresql://alejandria:alejandria@localhost:5432/alejandria` | pg connection string |
-| `REDIS_HOST` | `localhost` | ioredis host |
-| `REDIS_PORT` | `6379` | ioredis port |
-| `APP_VERSION` | `0.1.0` | overrides the version reported by `/health` |
-| `NAS_PAIR_PIN` | `0000` | single shared pairing PIN (PR-2C) |
-| `NAS_PIN_TTL_DAYS` | `30` | PIN window; `0` or negative ⇒ PIN is treated as expired (PR-2C) |
-| `NAS_JWT_SECRET` | `dev-secret-change-me` | HMAC secret for issued JWTs — **must** be set in prod (PR-2C) |
-| `NAS_JWT_TTL_HOURS` | `24` | JWT lifetime (PR-2C) |
+| Name | Required | Default | Notes |
+|------|----------|---------|-------|
+| `PORT` | no | `3000` | HTTP listener port |
+| `DATABASE_URL` | no | `postgresql://alejandria:alejandria@localhost:5432/alejandria` | pg connection string |
+| `REDIS_HOST` | no | `localhost` | ioredis host |
+| `REDIS_PORT` | no | `6379` | ioredis port |
+| `APP_VERSION` | no | `0.1.0` | overrides the version reported by `/health` |
+| `NAS_PAIR_PIN` | **yes** | — | Single shared pairing PIN, **≥ 8 characters** (4R review #32). Boot fails when unset or short. |
+| `NAS_PIN_TTL_DAYS` | no | `30` | PIN window; `0` or negative ⇒ PIN is treated as expired |
+| `NAS_JWT_SECRET` | **yes** | — | HMAC secret for issued JWTs, **≥ 32 bytes** (HS256 security floor). Boot fails when unset or short (4R review #32). |
+| `NAS_JWT_TTL_HOURS` | no | `24` | JWT lifetime |
+| `NAS_LIBRARY_ROOT` | no | `/share/biblioteca/raw/` | Root every scan job path is resolved against (4R review #33). Paths outside the root are rejected with `INVALID_PATH` before `spawn`. |
 
 In docker-compose these are wired to the in-stack service names
-(`postgres`, `redis`).
+(`postgres`, `redis`). The security env vars ship with
+**placeholder values** — replace them with random secrets before
+exposing the container to anything but a local developer box:
+
+```bash
+openssl rand -base64 48   # → NAS_JWT_SECRET (>= 32 bytes)
+openssl rand -base64 16   # → NAS_PAIR_PIN  (>= 8 chars)
+```
 
 ## What's NOT here yet
 
@@ -245,31 +266,41 @@ keeps serving traffic and `GET /health` reports
 workers module safe to run in CI and local dev without a live
 broker.
 
-## Discovery (PR-2F)
+## Discovery (PR-2F, hardened PR-2F.1)
 
 PR-2F adds the discovery module so LAN + Tailscale clients can
-find the NAS without manual IP / DNS configuration. The endpoint
-sits at `GET /api/discovery/info` and is intentionally **open**
-(no `JwtAuthGuard`) because clients need to find the NAS BEFORE
-they have a bearer token — see
-[`openspec/changes/alejandria-v2/specs/nas-discovery-auth/spec.md`](../openspec/changes/alejandria-v2/specs/nas-discovery-auth/spec.md).
+find the NAS without manual IP / DNS configuration. **PR-2F.1
+splits the surface** (4R review #44) so the pre-auth endpoint
+never reveals the NAS network-internal layout.
 
 ```
-GET /api/discovery/info
+GET /api/discovery/info       (pre-auth, open)
   → 200 {
       mdns_name:    'alejandria-nas.local',
-      port:         3000,
+      port:         3000
+    }
+  429: { error: { code: 'THROTTLED', message } }   (60 requests / min / IP)
+
+GET /api/discovery/network    (Bearer required)
+  Headers: Authorization: Bearer <jwt>
+  → 200 {
       tailscale_ip: '100.64.0.5' | null,
       lan_ips:      ['192.168.1.50', ...]
     }
+  401: { error: { code: 'UNAUTHORIZED', message } }
 ```
 
-| Field          | Source                                                   |
-|----------------|----------------------------------------------------------|
-| `mdns_name`    | Bonjour responder published by `MdnsService` (`_alejandria._tcp`). |
-| `port`         | `PORT` env var (default 3000).                           |
-| `tailscale_ip` | `tailscale ip -4` shelled out by `TailscaleService`; `null` when `tailscale` is missing / `tailscaled` is down. |
-| `lan_ips`      | Every non-loopback IPv4 from `os.networkInterfaces()`.  |
+| Endpoint         | Auth     | Why this surface |
+|------------------|----------|------------------|
+| `/info`          | open     | Brand-new clients need the mDNS name + port to even reach the API. |
+| `/network`       | Bearer   | LAN + Tailscale IPs reveal the NAS network surface to attackers and are only useful AFTER pairing. |
+
+| Field          | Endpoint       | Source                                                   |
+|----------------|----------------|----------------------------------------------------------|
+| `mdns_name`    | `/info`        | Bonjour responder published by `MdnsService` (`_alejandria._tcp`). |
+| `port`         | `/info`        | `PORT` env var (default 3000).                           |
+| `tailscale_ip` | `/network`     | `tailscale ip -4` shelled out by `TailscaleService`; `null` when `tailscale` is missing / `tailscaled` is down. |
+| `lan_ips`      | `/network`     | Every non-loopback IPv4 from `os.networkInterfaces()`.  |
 
 ### mDNS publish (`MdnsService`)
 
@@ -298,9 +329,9 @@ spawning a real process on the runner.
 
 ### Module map addition
 
-| Module            | Controller routes              | Services                              | Tokens                                          |
-|-------------------|--------------------------------|---------------------------------------|------------------------------------------------|
-| `DiscoveryModule` | `GET /api/discovery/info`      | `DiscoveryService`, `MdnsService`, `TailscaleService` | `MDNS_NAME`, `LAN_IPS`, `NAS_HTTP_PORT`, `MDNS_SERVICE_NAME`, `MDNS_SERVICE_PORT`, `MDNS_SERVICE_HOST`, `BONJOUR`, `TAILSCALE_SHELL` |
+| Module            | Controller routes                                        | Services                              | Tokens                                          |
+|-------------------|----------------------------------------------------------|---------------------------------------|------------------------------------------------|
+| `DiscoveryModule` | `GET /api/discovery/info` (open), `GET /api/discovery/network` (Bearer) | `DiscoveryService`, `MdnsService`, `TailscaleService` | `MDNS_NAME`, `LAN_IPS`, `NAS_HTTP_PORT`, `MDNS_SERVICE_NAME`, `MDNS_SERVICE_PORT`, `MDNS_SERVICE_HOST`, `BONJOUR`, `TAILSCALE_SHELL` |
 
 All tokens are namespaced `NAS_*` so they cannot collide with
 anything the other modules inject. The same string-token pattern
@@ -358,25 +389,28 @@ pgroonga instance.
 | `DevicesRepository` | `insert`, `findByDeviceId`, `updateTokenHash`, `touch` |
 | `SearchRepository` | `search` (pgroonga `&@~` + `pgroonga.score(tableoid)`) |
 
-## Auth (PR-2C)
+## Auth (PR-2C, hardened PR-2F.1)
 
 The auth module issues a per-device bearer token after a one-time
 PIN pairing. Every endpoint other than `GET /health`,
-`POST /api/auth/pair`, and `POST /api/auth/refresh` requires a
-valid `Authorization: Bearer <jwt>` header.
+`GET /api/discovery/info`, `POST /api/auth/pair`, and
+`POST /api/auth/refresh` requires a valid
+`Authorization: Bearer <jwt>` header.
 
 ### Endpoints
 
 ```
 POST /api/auth/pair
-  Body:    { pin: "0000", device_name: "iPad de Seba" }
+  Body:    { pin: "12345678", device_name: "iPad de Seba" }
   201 OK:  { token: "<jwt>", expires_at: "<iso>", device_id: "<uuid>" }
   401:     { error: { code: "BAD_PIN" | "PIN_EXPIRED", message } }
+  429:     { error: { code: "THROTTLED", message } }   (5 attempts / min / IP)
 
 POST /api/auth/refresh
   Body:    { token: "<old-jwt>" }
   201 OK:  { token: "<new-jwt>", expires_at: "<iso>", device_id: "<uuid>" }
   401:     { error: { code: "TOKEN_INVALID" | "TOKEN_EXPIRED", message } }
+  429:     { error: { code: "THROTTLED", message } }   (10 attempts / min / IP)
 
 GET  /api/me          (sample protected route)
   Headers: Authorization: Bearer <jwt>
@@ -386,9 +420,10 @@ GET  /api/me          (sample protected route)
 
 ### Flow
 
-1. The NAS admin UI shows a PIN (env: `NAS_PAIR_PIN`, default
-   `0000`). The PIN is treated as expired when
-   `NAS_PIN_TTL_DAYS <= 0`.
+1. The NAS admin UI shows a PIN (env: `NAS_PAIR_PIN`, no default).
+   The PIN is treated as expired when `NAS_PIN_TTL_DAYS <= 0`.
+   **Boot fails** when `NAS_PAIR_PIN` is unset or shorter than
+   8 characters (4R review #32).
 2. The device POSTs the PIN to `/api/auth/pair`. The server mints
    a JWT (HS256, default 24h TTL, env: `NAS_JWT_TTL_HOURS`) with
    claims `{ sub: device_id, jti: random(16 bytes hex) }` and
@@ -406,6 +441,22 @@ GET  /api/me          (sample protected route)
    matches the stored hash.
 5. `last_seen_at` is updated asynchronously on every successful
    authentication (the request does not block on this write).
+
+### Security configuration (4R review #32)
+
+The auth module refuses to start when:
+
+| Variable         | Minimum | Reason |
+|------------------|---------|--------|
+| `NAS_JWT_SECRET` | 32 bytes (256 bits) | HS256 security floor. Shorter secrets can be brute-forced offline. |
+| `NAS_PAIR_PIN`   | 8 characters | Below 8 the PIN space is too small to resist an offline attack at the 5-attempts-per-minute rate limit. |
+
+There are **no fallbacks**. The previous hardcoded defaults
+(`dev-secret-change-me`, `0000`) silently weakened production
+deploys; they have been removed. The boot-time check is wired
+in `src/auth/auth.module.ts` and `src/auth/auth.service.ts`,
+exercised by `test/auth.e2e-spec.ts` → `Auth module — boot-time
+security validation`.
 
 ### Why SHA-256 instead of bcrypt for the token hash
 

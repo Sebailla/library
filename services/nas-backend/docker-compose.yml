@@ -62,6 +62,14 @@ services:
       DATABASE_URL: postgresql://alejandria:alejandria@postgres:5432/alejandria
       REDIS_HOST: redis
       REDIS_PORT: 6379
+      # Security: the app refuses to boot without these (4R review
+      # #32). Override with real random values for production:
+      #   openssl rand -base64 48          # for NAS_JWT_SECRET (>= 32 bytes)
+      #   openssl rand -base64 16          # for NAS_PAIR_PIN (>= 8 chars)
+      NAS_JWT_SECRET: change-me-in-prod-NAS_JWT_SECRET-32-bytes-min
+      NAS_PAIR_PIN: change-me-in-prod-NAS_PAIR_PIN-8-chars-min
+      NAS_PIN_TTL_DAYS: "30"
+      NAS_JWT_TTL_HOURS: "24"
     ports:
       - "3000:3000"
 
