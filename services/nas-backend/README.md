@@ -6,6 +6,9 @@ NestJS application that backs the **alejandria-v2** NAS catalog.
 > `openspec/changes/alejandria-v2/tasks.md` Phase 2).
 >
 > - **PR-2A** — scaffold + docker-compose + `GET /health`
+> - **PR-2G** — resilience (BullMQ retry cap, mDNS error listener,
+>   `schema_migrations` table, `/livez` + `/readyz` split,
+>   scan-processor timeout + buffer cap)
 > - **PR-2B** — Postgres schema, pgroonga indexes, idempotent
 >   migrations, repository layer (`books`, `categories`, `sagas`,
 >   `downloads`)
@@ -77,9 +80,11 @@ cd services/nas-backend
 docker compose up --build
 # In another terminal:
 curl -s http://localhost:3000/health | jq
+curl -s http://localhost:3000/livez | jq
+curl -s http://localhost:3000/readyz | jq
 ```
 
-Expected healthy response:
+Expected healthy response (`/health`):
 
 ```json
 {
@@ -89,7 +94,7 @@ Expected healthy response:
 }
 ```
 
-When Postgres or Redis are down, the endpoint returns **503** with
+When Postgres or Redis are down, `/health` returns **503** with
 per-check status:
 
 ```json
@@ -103,6 +108,12 @@ per-check status:
   }
 }
 ```
+
+`/livez` always returns **200** (liveness ignores dependencies).
+`/readyz` returns **200** when Postgres is reachable; Redis-down
+stays **200** because the HTTP layer is fully functional on
+Postgres alone. `/readyz` returns **503** only when Postgres is
+unreachable.
 
 ### Option B — npm only (without DB / Redis)
 
@@ -140,9 +151,13 @@ Coverage:
 | DB + Redis healthy | `200` `{ status: "ok", timestamp, version }` |
 | DB unreachable | `503` `{ status: "error", checks.db.ok = false }` |
 | Redis unreachable | `503` `{ status: "error", checks.redis.ok = false }` |
+| `/livez` always returns 200 | liveness ignores dependencies |
+| `/readyz` Postgres-only check | 200 when DB up, 503 when DB down |
 | Migration runner — files listed in lexicographic order | matches `001_…009_*.sql` |
 | Migration runner — applied against a fresh schema | all 9 files report `applied` |
 | Migration runner — idempotent | second run returns without throwing |
+| Migration runner — `schema_migrations` table records every applied file | rows for every `.sql` |
+| Migration runner — re-run skips already-applied files | zero new rows on second run |
 | pgroonga indexes on `books.title` and `books.excerpt` | both `*_pgroonga_idx` exist |
 | Bilingual category seed (migration 009) | `/ciencia`, `/arte`, `/literatura` present with `parent_id` wired |
 | `BooksRepository` insert + findById | round-trip |
@@ -256,6 +271,42 @@ without parsing stderr. Errors are caught and the job is acked so a
 corrupt input never halts the queue (per
 `nas-scanner-workers` spec § "Errors are isolated, never blocking").
 
+#### Retry budget (4R review #35)
+
+Both workers share the same defaults from `buildQueueOptions()`:
+
+- `attempts: 3` with exponential 5s backoff (transient spawn
+  failures get a retry; corrupt input does not).
+- `removeOnComplete: { age: 3600, count: 1000 }` (trim completed
+  jobs after 1h or 1000 entries).
+- `removeOnFail: { age: 86400 }` (keep failed jobs for 24h so an
+  operator can inspect).
+
+The processor is wrapped in `makeResilientProcessor()` so a
+`SidecarError` (corrupt input — `FILE_UNREADABLE`,
+`INVALID_PATH`, etc.) becomes `UnrecoverableError` and BullMQ
+skips remaining retries. Transient errors (Redis blip, spawn
+ENOMEM) are rethrown unchanged so BullMQ's normal retry loop
+applies.
+
+#### Spawn safety (4R review #45)
+
+`ScanProcessor.runExtract` enforces two walls around the
+`python -m alejandria_sidecar extract <path>` spawn:
+
+- `MAX_OUTPUT_BYTES = 64 MB` per stream (stdout AND stderr).
+  On overflow the child is SIGKILL'd and the rejection is
+  translated to `UnrecoverableError` with `SidecarError.code =
+  OUTPUT_OVERFLOW`. A misbehaving sidecar cannot OOM the worker.
+- `SPAWN_TIMEOUT_MS = 60 s` wall-clock. On timeout the child is
+  SIGKILL'd and the rejection is `UnrecoverableError` with
+  `SidecarError.code = SPAWN_TIMEOUT`. A hung Python interpreter
+  cannot block the queue forever.
+
+Both limits are exposed as constants and constructor options
+(`maxOutputBytes`, `spawnTimeoutMs`) so tests can lower them
+without allocating 64 MB / waiting 60 s.
+
 #### Graceful Redis-down behaviour
 
 `WorkersBootstrap.onModuleInit` probes Redis with a 750ms timeout
@@ -313,6 +364,19 @@ test runner never opens a real mDNS responder. Publish errors
 the API keeps booting; the discovery endpoint then reports the
 LAN IPs as the fallback.
 
+**Avahi / Bonjour requirement.** The `bonjour` npm package
+emits `'error'` asynchronously when UDP bind fails (EADDRINUSE
+on 5353, EACCES without Avahi, etc.). `MdnsService` attaches
+an `'error'` listener at construction time (4R review #36) so
+the expected steady state on a QNAP container without Avahi /
+Bonjour is a logged warning, not a process crash. To enable
+mDNS discovery on a Linux host, install **Avahi**:
+
+```bash
+sudo apt-get install avahi-daemon avahi-utils   # Debian / Ubuntu
+sudo systemctl enable --now avahi-daemon
+```
+
 ### Tailscale probe (`TailscaleService`)
 
 `TailscaleService.getIp` shells out to `tailscale ip -4` via
@@ -340,22 +404,37 @@ is used by `HealthModule` (`DATABASE_PING`, `REDIS_PING`) and
 
 ## Migrations
 
-Every schema change ships as a numbered, idempotent SQL file under
+Every schema change ships as a numbered SQL file under
 [`migrations/`](./migrations). The runner in
-[`scripts/migrate.ts`](./scripts/migrate.ts) walks the directory in
-lexicographic order and applies each file in its own transaction.
-Idempotency is enforced by every migration itself — each `CREATE`
-uses `IF NOT EXISTS`, every seed insert is guarded by a
-`WHERE NOT EXISTS` check on the unique path.
+[`scripts/migrate.ts`](./scripts/migrate.ts) walks the directory
+in lexicographic order and applies each file in its own
+transaction. The runner owns a `schema_migrations` table
+(filename PK, applied_at timestamptz) that records every
+applied file (4R review #37). On every run the table is created
+if missing (`CREATE TABLE IF NOT EXISTS`); already-applied
+files short-circuit and are reported under `skipped`. Newly-
+applied files are inserted into `schema_migrations` AND executed
+inside the SAME transaction, so a partial failure rolls back the
+row too — the operator can fix + retry and the previously-failed
+file is re-applied.
 
 ```bash
 # Default: read DATABASE_URL from env, run every migration.
 DATABASE_URL=postgresql://alejandria:alejandria@localhost:5432/alejandria \
   npm run migrate
 
-# Idempotent: a second run is a no-op.
+# Re-run: every previously-applied file is skipped, zero new
+# schema_migrations rows are inserted.
 DATABASE_URL=… npm run migrate
 ```
+
+### Probe endpoints for k8s / load balancers
+
+| Endpoint  | Wire to       | 200 when                                | 503 when         |
+|-----------|---------------|-----------------------------------------|------------------|
+| `/livez`  | `livenessProbe`  | process is up                       | never            |
+| `/readyz` | `readinessProbe` | Postgres reachable (Redis-down OK) | Postgres down    |
+| `/health` | operator curl    | Postgres + Redis both reachable      | either down      |
 
 Files shipped in PR-2B + PR-2C:
 
@@ -393,9 +472,9 @@ pgroonga instance.
 
 The auth module issues a per-device bearer token after a one-time
 PIN pairing. Every endpoint other than `GET /health`,
-`GET /api/discovery/info`, `POST /api/auth/pair`, and
-`POST /api/auth/refresh` requires a valid
-`Authorization: Bearer <jwt>` header.
+`GET /livez`, `GET /readyz`, `GET /api/discovery/info`,
+`POST /api/auth/pair`, and `POST /api/auth/refresh` requires a
+valid `Authorization: Bearer <jwt>` header.
 
 ### Endpoints
 

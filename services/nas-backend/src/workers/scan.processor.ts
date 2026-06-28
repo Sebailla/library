@@ -1,6 +1,7 @@
 import { ChildProcess, SpawnOptions, spawn as defaultSpawn } from 'child_process';
 import { relative as pathRelative, resolve as resolvePath } from 'path';
 import { Logger } from '@nestjs/common';
+import { UnrecoverableError } from 'bullmq';
 
 /**
  * JSON envelope every ``alejandria-sidecar`` invocation emits on
@@ -76,6 +77,21 @@ export interface ScanProcessorOptions {
    * ``INVALID_PATH``) so they never reach ``spawn``.
    */
   libraryRoot?: string;
+  /**
+   * Override the maximum number of bytes the processor will
+   * accumulate from a single stream before killing the child
+   * (4R review #45). Defaults to {@link MAX_OUTPUT_BYTES}
+   * (64 MB). Tests lower this to a small value so the suite
+   * does not allocate 64 MB of fake stdout.
+   */
+  maxOutputBytes?: number;
+  /**
+   * Override the spawn wall-clock timeout (4R review #45).
+   * Defaults to {@link SPAWN_TIMEOUT_MS} (60 s). Tests lower
+   * this to a small value so the suite does not have to wait
+   * the full 60 s for a hung-child assertion.
+   */
+  spawnTimeoutMs?: number;
 }
 
 /**
@@ -120,6 +136,25 @@ export class SidecarError extends Error {
 const DEFAULT_LIBRARY_ROOT = '/share/biblioteca/raw/';
 
 /**
+ * Maximum number of bytes the processor will accumulate from
+ * ``stdout`` OR ``stderr`` before killing the child (4R review
+ * #45). The cap is enforced per-stream so a misbehaving sidecar
+ * that spews only to stderr is still caught. 64 MB matches the
+ * ``pgroonga`` / large-book index overhead and leaves headroom
+ * for the rest of the worker process.
+ */
+export const MAX_OUTPUT_BYTES = 64 * 1024 * 1024;
+
+/**
+ * Maximum time a single ``spawn`` is allowed to run before the
+ * processor SIGKILLs the child (4R review #45). A hung Python
+ * interpreter (GIL deadlock, network call inside the sidecar)
+ * MUST NOT block the worker forever — the BullMQ retry budget
+ * is for transient failures, not infinite hangs.
+ */
+export const SPAWN_TIMEOUT_MS = 60_000;
+
+/**
  * Scan processor — the BullMQ-side half of the
  * ``alejandria-sidecar`` boundary. Owns spawning the sidecar CLI,
  * collecting its JSON envelope, and surfacing typed errors when
@@ -154,6 +189,10 @@ export class ScanProcessor {
   private readonly spawn: SpawnFn;
   private readonly pythonCommand: string;
   private readonly libraryRoot: string;
+  /** Per-stream stdout/stderr byte cap (4R review #45). */
+  readonly maxOutputBytes: number;
+  /** Wall-clock timeout for a single spawn (4R review #45). */
+  readonly timeoutMs: number;
 
   constructor(options: ScanProcessorOptions = {}) {
     this.spawn =
@@ -166,6 +205,8 @@ export class ScanProcessor {
       DEFAULT_LIBRARY_ROOT;
     // Normalise so ``path.relative`` treats both sides the same way.
     this.libraryRoot = resolvePath(rawRoot);
+    this.maxOutputBytes = options.maxOutputBytes ?? MAX_OUTPUT_BYTES;
+    this.timeoutMs = options.spawnTimeoutMs ?? SPAWN_TIMEOUT_MS;
   }
 
   /**
@@ -238,6 +279,17 @@ export class ScanProcessor {
    * <path>`` and parse the JSON envelope. The argv layout is the
    * one the sidecar's own ``argparse`` parser expects — see
    * ``alejandria_sidecar/cli.py``.
+   *
+   * 4R review #45: the spawn is bounded by two walls:
+   *
+   *   - ``this.maxOutputBytes`` (default 64 MB) — once a stream
+   *     accumulates that many bytes we SIGKILL the child and
+   *     reject with a {@link SidecarError} whose ``code`` is
+   *     ``OUTPUT_OVERFLOW``. BullMQ sees an UnrecoverableError
+   *     and skips remaining retries.
+   *   - ``this.timeoutMs`` (default 60 s) — a setTimeout kills
+   *     the child on a hung interpreter. Same outcome: the
+   *     rejection is translated to UnrecoverableError.
    */
   private runExtract(path: string): Promise<SidecarEnvelope> {
     return new Promise<SidecarEnvelope>((resolve, reject) => {
@@ -250,15 +302,79 @@ export class ScanProcessor {
 
       let stdout = '';
       let stderr = '';
+      let stdoutBytes = 0;
+      let stderrBytes = 0;
+      let aborted = false;
+      const abortReason: { code: string; message: string } | null = null;
+
+      const failWith = (code: string, message: string): void => {
+        if (aborted) return;
+        aborted = true;
+        clearTimeout(timer);
+        // SIGKILL the child; the ``exit`` handler is a no-op once
+        // ``aborted`` is set so the rejection is delivered exactly
+        // once. UnrecoverableError makes BullMQ skip remaining
+        // retries (a misbehaving CLI is not going to recover).
+        try {
+          child.kill('SIGKILL');
+        } catch {
+          /* best-effort */
+        }
+        reject(
+          new UnrecoverableError(
+            new SidecarError({
+              code,
+              exitCode: -1,
+              stderr,
+              envelope: null,
+              message,
+            }).message,
+          ),
+        );
+      };
 
       child.stdout?.on('data', (chunk: Buffer | string) => {
-        stdout += chunk.toString('utf8');
+        if (aborted) return;
+        const text = chunk.toString('utf8');
+        stdout += text;
+        stdoutBytes += Buffer.byteLength(text, 'utf8');
+        if (stdoutBytes > this.maxOutputBytes) {
+          failWith(
+            'OUTPUT_OVERFLOW',
+            `sidecar stdout exceeded ${this.maxOutputBytes} bytes`,
+          );
+        }
       });
       child.stderr?.on('data', (chunk: Buffer | string) => {
-        stderr += chunk.toString('utf8');
+        if (aborted) return;
+        const text = chunk.toString('utf8');
+        stderr += text;
+        stderrBytes += Buffer.byteLength(text, 'utf8');
+        if (stderrBytes > this.maxOutputBytes) {
+          failWith(
+            'OUTPUT_OVERFLOW',
+            `sidecar stderr exceeded ${this.maxOutputBytes} bytes`,
+          );
+        }
       });
 
+      // Wall-clock cap. SIGKILL the child on a hung interpreter;
+      // the exit handler is a no-op once ``aborted`` is set.
+      const timer = setTimeout(() => {
+        failWith(
+          'SPAWN_TIMEOUT',
+          `sidecar ${this.pythonCommand} timed out after ${this.timeoutMs} ms`,
+        );
+      }, this.timeoutMs);
+      // Keep the event loop alive only while the child is running.
+      if (typeof (timer as { unref?: () => void }).unref === 'function') {
+        (timer as { unref: () => void }).unref();
+      }
+
       child.on('error', (err) => {
+        if (aborted) return;
+        aborted = true;
+        clearTimeout(timer);
         reject(
           new SidecarError({
             code: 'SPAWN_FAILED',
@@ -271,6 +387,9 @@ export class ScanProcessor {
       });
 
       child.on('exit', (exit) => {
+        if (aborted) return;
+        aborted = true;
+        clearTimeout(timer);
         const exitCode = exit ?? -1;
         const envelope = parseEnvelope(stdout);
         if (exitCode === 0) {
