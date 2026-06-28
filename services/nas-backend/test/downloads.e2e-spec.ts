@@ -775,6 +775,188 @@ describe('GET /api/downloads/by-device/:device_id', () => {
   });
 });
 
+/**
+ * 4R review #42 — IDOR fixes for /api/downloads.
+ *
+ * Before this PR:
+ *   - POST /api/downloads accepted ``device_id`` / ``device_name`` /
+ *     ``user_id`` in the body. A malicious device could send
+ *     ``device_id: '<victim-device-id>'`` and attribute the row
+ *     to the victim.
+ *   - PATCH /api/downloads/:id had no ownership check. Device A
+ *     could PATCH Device B's row.
+ *   - GET /api/downloads/by-device/:device_id had no ownership
+ *     check. Device A could query Device B's full history.
+ *
+ * After the fix:
+ *   - The POST body only carries ``book_id`` (+ optional
+ *     ``file_size_bytes``). ``device_id`` / ``device_name`` /
+ *     ``user_id`` are silently dropped and the server uses
+ *     ``req.device`` exclusively.
+ *   - PATCH first looks up the row and refuses (403 FORBIDDEN)
+ *     if ``row.device_id`` does not match the bearer device.
+ *   - GET /by-device/:device_id refuses (403 FORBIDDEN) when
+ *     the param does not match the bearer device.
+ *
+ * Tests below exercise each IDOR surface.
+ */
+describe('IDOR hardening for /api/downloads (4R review #42)', () => {
+  afterEach(() => {
+    restoreEnv();
+  });
+
+  it('POST ignores body device_id — server uses req.device instead', async () => {
+    const { app, books, downloads } = await buildApp();
+    try {
+      const book = await seedBook(books, {
+        title: 'Crime and Punishment',
+        filePath: '/lib/crime.epub',
+      });
+      const token = await pairAndGetToken(app);
+
+      // Pair returns the auto-assigned device_id; we need it
+      // back to confirm the row is attributed to the bearer.
+      const pair = await request(app.getHttpServer())
+        .post('/api/auth/pair')
+        .send({ pin: '12345678', device_name: 'SpoofAttempt' })
+        .expect(201);
+      const attackerDeviceId = pair.body.device_id as string;
+
+      const res = await request(app.getHttpServer())
+        .post('/api/downloads')
+        .set('Authorization', `Bearer ${token}`)
+        .send({
+          book_id: book.id,
+          device_id: '00000000-0000-0000-0000-deadbeef0000',
+          device_name: 'INJECTED-NAME',
+          user_id: 'INJECTED-USER',
+          file_size_bytes: 1024,
+        })
+        .expect(201);
+
+      const row = await downloads.findById(res.body.download_id as number);
+      // The server MUST attribute the row to the bearer's device,
+      // NOT the spoofed body fields.
+      expect(row?.deviceId).toBe(attackerDeviceId);
+      expect(row?.deviceId).not.toBe('00000000-0000-0000-0000-deadbeef0000');
+      expect(row?.deviceName).toBe('SpoofAttempt');
+      expect(row?.deviceName).not.toBe('INJECTED-NAME');
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('PATCH /api/downloads/:id returns 403 when the row belongs to a different device', async () => {
+    const { app, books, downloads } = await buildApp();
+    try {
+      const book = await seedBook(books, {
+        title: 'Beloved',
+        filePath: '/lib/beloved.epub',
+      });
+
+      // Pair device A → token A. Create a download row for A.
+      const tokenA = await pairAndGetToken(app);
+      const pairA = await request(app.getHttpServer())
+        .post('/api/auth/pair')
+        .send({ pin: '12345678', device_name: 'DeviceA' })
+        .expect(201);
+      const deviceA = pairA.body.device_id as string;
+
+      const created = await request(app.getHttpServer())
+        .post('/api/downloads')
+        .set('Authorization', `Bearer ${tokenA}`)
+        .send({ book_id: book.id, file_size_bytes: 1024 })
+        .expect(201);
+      const downloadId = created.body.download_id as number;
+
+      // Pair device B → token B. Try to PATCH A's download.
+      const tokenB = await pairAndGetToken(app);
+      const res = await request(app.getHttpServer())
+        .patch(`/api/downloads/${downloadId}`)
+        .set('Authorization', `Bearer ${tokenB}`)
+        .send({ completed: true, bytes_transferred: 1024 })
+        .expect(403);
+      expect(res.body.error.code).toBe('FORBIDDEN');
+
+      // The row MUST remain in its original state — device A's
+      // bytes_transferred is still 0, completed still false.
+      const row = await downloads.findById(downloadId);
+      expect(row?.bytesTransferred).toBe(0);
+      expect(row?.completed).toBe(false);
+      expect(row?.deviceId).toBe(deviceA);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('PATCH /api/downloads/:id succeeds for the owning device (positive control)', async () => {
+    const { app, books } = await buildApp();
+    try {
+      const book = await seedBook(books, {
+        title: 'Native Son',
+        filePath: '/lib/native.epub',
+      });
+      const token = await pairAndGetToken(app);
+      const created = await request(app.getHttpServer())
+        .post('/api/downloads')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ book_id: book.id, file_size_bytes: 1024 })
+        .expect(201);
+      const id = created.body.download_id as number;
+
+      const patched = await request(app.getHttpServer())
+        .patch(`/api/downloads/${id}`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({ completed: true, bytes_transferred: 1024 })
+        .expect(200);
+      expect(patched.body.completed).toBe(true);
+      expect(patched.body.bytes_transferred).toBe(1024);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('GET /api/downloads/by-device/:device_id returns 403 when the param does not match the bearer', async () => {
+    const { app } = await buildApp();
+    try {
+      const token = await pairAndGetToken(app);
+      const pair = await request(app.getHttpServer())
+        .post('/api/auth/pair')
+        .send({ pin: '12345678', device_name: 'DeviceB' })
+        .expect(201);
+      const deviceB = pair.body.device_id as string;
+
+      const res = await request(app.getHttpServer())
+        .get(`/api/downloads/by-device/${deviceB}`)
+        .set('Authorization', `Bearer ${token}`)
+        .expect(403);
+      expect(res.body.error.code).toBe('FORBIDDEN');
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('GET /api/downloads/by-device/:device_id returns 200 when the param matches the bearer', async () => {
+    const { app } = await buildApp();
+    try {
+      const pair = await request(app.getHttpServer())
+        .post('/api/auth/pair')
+        .send({ pin: '12345678', device_name: 'Self' })
+        .expect(201);
+      const ownDeviceId = pair.body.device_id as string;
+      const token = pair.body.token as string;
+
+      const res = await request(app.getHttpServer())
+        .get(`/api/downloads/by-device/${ownDeviceId}`)
+        .set('Authorization', `Bearer ${token}`)
+        .expect(200);
+      expect(Array.isArray(res.body.data)).toBe(true);
+    } finally {
+      await app.close();
+    }
+  });
+});
+
 // Type-only re-export so the test can assert the repository contract
 // shape compiled into the production module matches what we mock.
 export type { DownloadsRepository };
