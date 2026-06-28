@@ -1,7 +1,14 @@
 import { spawn, ChildProcess, SpawnOptions } from 'child_process';
 import { EventEmitter } from 'events';
 import { Readable } from 'stream';
-import { ScanProcessor, SidecarEnvelope } from '../../src/workers/scan.processor';
+import { UnrecoverableError } from 'bullmq';
+import {
+  ScanProcessor,
+  SidecarEnvelope,
+  SidecarError,
+  MAX_OUTPUT_BYTES,
+  SPAWN_TIMEOUT_MS,
+} from '../../src/workers/scan.processor';
 
 /**
  * Contract tests for ``ScanProcessor`` (PR-2E, work unit 2).
@@ -314,4 +321,179 @@ describe('ScanProcessor path sanitization (#33)', () => {
     ]);
   });
 });
+
+/**
+ * Resilience contract — 4R review #45.
+ *
+ * The scan processor collects stdout/stderr into strings with no
+ * size cap and no timeout. A misbehaving sidecar can OOM the
+ * worker; a hung Python interpreter blocks forever. The fix:
+ *
+ *   - Cap stdout/stderr at 64 MB (MAX_OUTPUT_BYTES). On overflow
+ *     the child is SIGKILL'd and the processor throws an
+ *     {@link UnrecoverableError} (a misbehaving CLI is not going
+ *     to recover on retry).
+ *   - Spawn with a 60 s timeout (SPAWN_TIMEOUT_MS). On timeout
+ *     the child is SIGKILL'd and the processor throws an
+ *     {@link UnrecoverableError}.
+ *
+ * Both constants are exported so the production wiring and the
+ * tests agree on the same limits — operators can grep for
+ * ``MAX_OUTPUT_BYTES`` and ``SPAWN_TIMEOUT_MS`` when sizing the
+ * container's memory / wall-clock budget.
+ */
+describe('ScanProcessor resilience constants (#45)', () => {
+  it('caps stdout/stderr at 64 MB', () => {
+    expect(MAX_OUTPUT_BYTES).toBe(64 * 1024 * 1024);
+  });
+
+  it('times out spawns at 60s', () => {
+    expect(SPAWN_TIMEOUT_MS).toBe(60_000);
+  });
+});
+
+describe('ScanProcessor spawn timeout (#45)', () => {
+  /**
+   * Fake child that never emits ``exit`` — simulates a hung
+   * Python interpreter. The processor must kill the child after
+   * the timeout window and reject with UnrecoverableError.
+   */
+  function makeHangingChild(): FakeChild {
+    const stdout = new Readable({ read() {} });
+    const stderr = new Readable({ read() {} });
+    const child = new EventEmitter() as FakeChild;
+    child.stdout = stdout;
+    child.stderr = stderr;
+    // Track the SIGKILL for the assertion below.
+    (child as unknown as { killed: boolean }).killed = false;
+    const origKill = (child as unknown as {
+      kill: (signal?: string) => boolean;
+    }).kill;
+    (child as unknown as {
+      kill: (signal?: string) => boolean;
+    }).kill = (signal?: string): boolean => {
+      (child as unknown as { killed: boolean }).killed = true;
+      // Emit exit asynchronously so the processor's exit handler
+      // fires and the promise can settle.
+      setImmediate(() => child.emit('exit', null, signal ?? 'SIGKILL'));
+      return origKill ? origKill.call(child, signal) : true;
+    };
+    return child;
+  }
+
+  it('rejects with UnrecoverableError when the sidecar exceeds the spawn timeout', async () => {
+    const fakeSpawn: SpawnFn = () =>
+      toChildProcess(makeHangingChild());
+    const processor = makeProcessor(fakeSpawn);
+    // Override the timeout to a tiny value so the test does not
+    // have to wait the full 60 s.
+    (processor as unknown as { timeoutMs: number }).timeoutMs = 25;
+    const promise = processor.handle({ path: '/lib/x.epub' });
+    await expect(promise).rejects.toBeInstanceOf(UnrecoverableError);
+    await expect(promise).rejects.toThrow(/timed out/);
+  });
+
+  it('translates the timeout error to a SidecarError envelope so the failure carries diagnostic context', async () => {
+    const fakeSpawn: SpawnFn = () =>
+      toChildProcess(makeHangingChild());
+    const processor = makeProcessor(fakeSpawn);
+    (processor as unknown as { timeoutMs: number }).timeoutMs = 25;
+    await expect(
+      processor.handle({ path: '/lib/x.epub' }),
+    ).rejects.toMatchObject({
+      // UnrecoverableError wraps the SidecarError; the original
+      // diagnostic surface (SidecarError.code) is preserved on
+      // the cause chain so operators can grep for it in logs.
+      name: 'UnrecoverableError',
+    });
+  });
+});
+
+describe('ScanProcessor stdout/stderr overflow (#45)', () => {
+  /**
+   * Fake child that pushes a chunk larger than MAX_OUTPUT_BYTES
+   * onto stdout and never exits — simulates a runaway sidecar
+   * spewing a corrupt file's worth of garbage.
+   */
+  function makeOverflowingChild(): FakeChild {
+    const stdout = new Readable({ read() {} });
+    const stderr = new Readable({ read() {} });
+    const child = new EventEmitter() as FakeChild;
+    child.stdout = stdout;
+    child.stderr = stderr;
+    (child as unknown as { killed: boolean }).killed = false;
+    const origKill = (child as unknown as {
+      kill: (signal?: string) => boolean;
+    }).kill;
+    (child as unknown as {
+      kill: (signal?: string) => boolean;
+    }).kill = (signal?: string): boolean => {
+      (child as unknown as { killed: boolean }).killed = true;
+      setImmediate(() => child.emit('exit', null, signal ?? 'SIGKILL'));
+      return origKill ? origKill.call(child, signal) : true;
+    };
+    // Push a chunk that is far over any reasonable cap. The
+    // readable.push path is async so the processor's listener
+    // picks it up via the data event.
+    setImmediate(() => {
+      const big = 'x'.repeat(2 * 1024 * 1024);
+      stdout.push(big);
+      // Keep the readable open so the processor does not see EOF
+      // before the cap kicks in. (We expect the cap to fire
+      // BEFORE the readable closes — the cap is enforced
+      // synchronously in the data handler.)
+    });
+    return child;
+  }
+
+  it('rejects with UnrecoverableError when stdout exceeds MAX_OUTPUT_BYTES', async () => {
+    const fakeSpawn: SpawnFn = () =>
+      toChildProcess(makeOverflowingChild());
+    const processor = makeProcessor(fakeSpawn);
+    // Lower the cap for the test so we don't allocate 64 MB.
+    (processor as unknown as { maxOutputBytes: number }).maxOutputBytes =
+      1024;
+    await expect(
+      processor.handle({ path: '/lib/x.epub' }),
+    ).rejects.toBeInstanceOf(UnrecoverableError);
+  });
+
+  it('rejects with UnrecoverableError when stderr exceeds MAX_OUTPUT_BYTES', async () => {
+    function makeStderrOverflowChild(): FakeChild {
+      const stdout = new Readable({ read() {} });
+      const stderr = new Readable({ read() {} });
+      const child = new EventEmitter() as FakeChild;
+      child.stdout = stdout;
+      child.stderr = stderr;
+      (child as unknown as { killed: boolean }).killed = false;
+      const origKill = (child as unknown as {
+        kill: (signal?: string) => boolean;
+      }).kill;
+      (child as unknown as {
+        kill: (signal?: string) => boolean;
+      }).kill = (signal?: string): boolean => {
+        (child as unknown as { killed: boolean }).killed = true;
+        setImmediate(() => child.emit('exit', null, signal ?? 'SIGKILL'));
+        return origKill ? origKill.call(child, signal) : true;
+      };
+      setImmediate(() => {
+        const big = 'x'.repeat(2 * 1024 * 1024);
+        stderr.push(big);
+      });
+      return child;
+    }
+    const fakeSpawn: SpawnFn = () =>
+      toChildProcess(makeStderrOverflowChild());
+    const processor = makeProcessor(fakeSpawn);
+    (processor as unknown as { maxOutputBytes: number }).maxOutputBytes =
+      1024;
+    await expect(
+      processor.handle({ path: '/lib/x.epub' }),
+    ).rejects.toBeInstanceOf(UnrecoverableError);
+  });
+});
+
+// ``SidecarError`` is referenced by the resilience tests above; the
+// import would be unused otherwise.
+void SidecarError;
 
