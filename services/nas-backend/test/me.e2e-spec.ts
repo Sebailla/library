@@ -97,9 +97,9 @@ async function buildApp(): Promise<{
   devices: InMemoryDevicesRepository;
 }> {
   setEnv({
-    NAS_PAIR_PIN: '0000',
+    NAS_PAIR_PIN: '12345678',
     NAS_PIN_TTL_DAYS: '30',
-    NAS_JWT_SECRET: 'test-secret-do-not-use-in-prod',
+    NAS_JWT_SECRET: 'test-secret-do-not-use-in-prod-must-be-32+bytes',
     NAS_JWT_TTL_HOURS: '24',
   });
   const devices = new InMemoryDevicesRepository();
@@ -137,7 +137,7 @@ describe('GET /api/me (sample protected route)', () => {
     try {
       const pair = await request(app.getHttpServer())
         .post('/api/auth/pair')
-        .send({ pin: '0000', device_name: 'iPad de Seba' })
+        .send({ pin: '12345678', device_name: 'iPad de Seba' })
         .expect(201);
       const res = await request(app.getHttpServer())
         .get('/api/me')
@@ -155,7 +155,7 @@ describe('GET /api/me (sample protected route)', () => {
     try {
       const pair = await request(app.getHttpServer())
         .post('/api/auth/pair')
-        .send({ pin: '0000', device_name: 'iPad' })
+        .send({ pin: '12345678', device_name: 'iPad' })
         .expect(201);
       const tampered = pair.body.token.slice(0, -3) + 'AAA';
       const res = await request(app.getHttpServer())

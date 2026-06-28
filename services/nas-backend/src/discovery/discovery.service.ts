@@ -1,6 +1,21 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { DiscoveryInfo } from './discovery.controller';
 import { TailscaleService } from './tailscale.service';
+
+/**
+ * Full discovery payload — assembled once by {@link DiscoveryService}
+ * and then projected to the two public shapes by
+ * {@link DiscoveryController}.
+ *
+ * Kept as a service-internal type so the controller can pin the
+ * pre-auth and auth-required shapes (#44) without leaking the IP
+ * surface to callers that do not need it.
+ */
+export interface DiscoveryFull {
+  mdns_name: string;
+  port: number;
+  tailscale_ip: string | null;
+  lan_ips: string[];
+}
 
 /**
  * String tokens used by {@link DiscoveryService} to pull its inputs
@@ -22,7 +37,7 @@ export const LAN_IPS = 'NAS_LAN_IPS';
 export const NAS_HTTP_PORT = 'NAS_HTTP_PORT';
 
 /**
- * Service that assembles the {@link DiscoveryInfo} payload from
+ * Service that assembles the full discovery payload from
  * injected dependencies.
  *
  * The Tailscale probe is delegated to {@link TailscaleService}
@@ -32,7 +47,8 @@ export const NAS_HTTP_PORT = 'NAS_HTTP_PORT';
  * providers so they can be overridden in tests.
  *
  * The service is intentionally a thin shape-mapping adapter:
- * production wiring lives in {@link DiscoveryModule}.
+ * production wiring lives in {@link DiscoveryModule}, and the
+ * controller decides which fields to expose per endpoint (#44).
  */
 @Injectable()
 export class DiscoveryService {
@@ -43,7 +59,7 @@ export class DiscoveryService {
     private readonly tailscale: TailscaleService,
   ) {}
 
-  async getInfo(): Promise<DiscoveryInfo> {
+  async getFull(): Promise<DiscoveryFull> {
     return {
       mdns_name: this.mdnsName,
       port: this.port,

@@ -6,6 +6,7 @@ import {
   Ip,
   Post,
 } from '@nestjs/common';
+import { Throttle } from '@nestjs/throttler';
 import { IsString, Length, Matches } from 'class-validator';
 import { AuthService } from './auth.service';
 
@@ -47,6 +48,11 @@ export interface TokenResponse {
  *
  * Both endpoints are public — no Bearer token is required to call
  * them. Pair mints a new JWT; refresh rotates an existing one.
+ *
+ * Rate limits (#34, 4R review): pair is the bruteforce target so
+ * its limit is tight (5/min/IP). refresh is legitimate but should
+ * not be unbounded, so it is 10/min/IP. Both are documented in
+ * ``test/throttler.e2e-spec.ts``.
  */
 @Controller({ path: 'api/auth', version: undefined })
 export class AuthController {
@@ -54,6 +60,7 @@ export class AuthController {
 
   @Post('pair')
   @HttpCode(HttpStatus.CREATED)
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
   async pair(
     @Body() body: PairDto,
     @Ip() ip: string,
@@ -72,6 +79,7 @@ export class AuthController {
 
   @Post('refresh')
   @HttpCode(HttpStatus.CREATED)
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
   async refresh(@Body() body: RefreshDto): Promise<TokenResponse> {
     const issued = await this.authService.refresh({ token: body.token });
     return {

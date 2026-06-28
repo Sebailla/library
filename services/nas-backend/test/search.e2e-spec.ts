@@ -126,9 +126,9 @@ async function buildApp(opts: {
   search?: InMemorySearchRepository;
 } = {}): Promise<{ app: INestApplication; search: InMemorySearchRepository }> {
   setEnv({
-    NAS_PAIR_PIN: '0000',
+    NAS_PAIR_PIN: '12345678',
     NAS_PIN_TTL_DAYS: '30',
-    NAS_JWT_SECRET: 'test-secret-do-not-use-in-prod',
+    NAS_JWT_SECRET: 'test-secret-do-not-use-in-prod-must-be-32+bytes',
     NAS_JWT_TTL_HOURS: '24',
   });
   const devices = new InMemoryDevicesRepository();
@@ -150,7 +150,7 @@ async function buildApp(opts: {
 async function pairAndGetToken(app: INestApplication): Promise<string> {
   const pair = await request(app.getHttpServer())
     .post('/api/auth/pair')
-    .send({ pin: '0000', device_name: 'TestDevice' })
+    .send({ pin: '12345678', device_name: 'TestDevice' })
     .expect(201);
   return pair.body.token as string;
 }

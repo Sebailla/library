@@ -30,6 +30,12 @@ describe('GET /health', () => {
     dbOverride: () => Promise<void> = okPing,
     redisOverride: () => Promise<void> = okPing,
   ): Promise<INestApplication> {
+    // The auth module refuses to boot without these env vars (4R
+    // review #32). The health test does not exercise auth, but the
+    // module graph still has to compile.
+    process.env.NAS_PAIR_PIN = process.env.NAS_PAIR_PIN ?? '12345678';
+    process.env.NAS_JWT_SECRET =
+      process.env.NAS_JWT_SECRET ?? 'test-secret-do-not-use-in-prod-must-be-32+bytes';
     const moduleRef: TestingModule = await Test.createTestingModule({
       imports: [AppModule],
     })

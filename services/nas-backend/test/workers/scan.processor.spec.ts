@@ -1,4 +1,4 @@
-import { spawn, ChildProcess } from 'child_process';
+import { spawn, ChildProcess, SpawnOptions } from 'child_process';
 import { EventEmitter } from 'events';
 import { Readable } from 'stream';
 import { ScanProcessor, SidecarEnvelope } from '../../src/workers/scan.processor';
@@ -46,7 +46,7 @@ function makeFakeChild(
 type SpawnFn = (
   command: string,
   args: readonly string[],
-  options?: { stdio?: 'pipe' | 'ignore' },
+  options?: SpawnOptions,
 ) => ChildProcess;
 
 /** Helper to coerce the test fakes into a ``ChildProcess`` for the API. */
@@ -57,9 +57,14 @@ function toChildProcess(fake: FakeChild): ChildProcess {
 /**
  * Test-only factory that mirrors ``ScanProcessor``'s signature but
  * lets each test inject the exact ``spawn`` behaviour it needs.
+ *
+ * ``libraryRoot: '/'`` keeps the existing spawn-contract tests
+ * focused on the sidecar surface — path sanitization has its
+ * own ``describe`` block below that exercises the configured
+ * root.
  */
 function makeProcessor(spawnImpl: SpawnFn): ScanProcessor {
-  return new ScanProcessor({ spawn: spawnImpl });
+  return new ScanProcessor({ spawn: spawnImpl, libraryRoot: '/' });
 }
 
 describe('ScanProcessor (BullMQ sidecar spawn)', () => {
@@ -192,6 +197,121 @@ describe('ScanProcessor (BullMQ sidecar spawn)', () => {
     await expect(processor.handle({ path: '/x' })).rejects.toThrow(
       /spawn python ENOENT/,
     );
+  });
+});
+
+/**
+ * Path sanitization contract for ``ScanProcessor`` (#33, 4R review).
+ *
+ * The processor shells out to ``python -m alejandria_sidecar
+ * extract <path>``. A malicious or accidental job payload must
+ * NOT be able to:
+ *
+ *   - read files OUTSIDE the configured library root (path
+ *     traversal via ``..`` segments).
+ *   - inject argv flags into the sidecar (path starting with
+ *     ``-``).
+ *   - spawn the sidecar with no path at all.
+ *
+ * ``NAS_LIBRARY_ROOT`` (default ``/share/biblioteca/raw/``) is
+ * the configured root. The processor MUST resolve the input
+ * path against that root, reject paths that escape it, reject
+ * paths starting with ``-``, and pass the resolved path as the
+ * final argv element so ``spawn`` cannot misinterpret it.
+ *
+ * On rejection, the processor MUST throw ``SidecarError`` with
+ * ``code = 'INVALID_PATH'`` (no spawn occurs).
+ */
+describe('ScanProcessor path sanitization (#33)', () => {
+  const ORIGINAL_ENV = { ...process.env };
+
+  function restoreEnv(): void {
+    for (const key of Object.keys(process.env)) {
+      if (!(key in ORIGINAL_ENV)) {
+        delete process.env[key];
+      }
+    }
+    for (const [k, v] of Object.entries(ORIGINAL_ENV)) {
+      process.env[k] = v;
+    }
+  }
+
+  function makeProcessorWithFakeSpawn(spawnImpl: SpawnFn): ScanProcessor {
+    return new ScanProcessor({
+      spawn: spawnImpl,
+      libraryRoot: '/share/biblioteca/raw/',
+    });
+  }
+
+  afterEach(() => {
+    restoreEnv();
+  });
+
+  it('rejects paths that contain `..` segments', async () => {
+    let spawnCalled = false;
+    const fakeSpawn: SpawnFn = () => {
+      spawnCalled = true;
+      return toChildProcess(makeFakeChild({ stdout: '', exitCode: 0 }));
+    };
+    const processor = makeProcessorWithFakeSpawn(fakeSpawn);
+    await expect(
+      processor.handle({ path: '/share/biblioteca/raw/../etc/passwd' }),
+    ).rejects.toMatchObject({ name: 'SidecarError', code: 'INVALID_PATH' });
+    expect(spawnCalled).toBe(false);
+  });
+
+  it('rejects paths that resolve outside the configured library root', async () => {
+    let spawnCalled = false;
+    const fakeSpawn: SpawnFn = () => {
+      spawnCalled = true;
+      return toChildProcess(makeFakeChild({ stdout: '', exitCode: 0 }));
+    };
+    const processor = makeProcessorWithFakeSpawn(fakeSpawn);
+    await expect(
+      processor.handle({ path: '/etc/passwd' }),
+    ).rejects.toMatchObject({ name: 'SidecarError', code: 'INVALID_PATH' });
+    expect(spawnCalled).toBe(false);
+  });
+
+  it('rejects paths that start with `-` (argv injection)', async () => {
+    let spawnCalled = false;
+    const fakeSpawn: SpawnFn = () => {
+      spawnCalled = true;
+      return toChildProcess(makeFakeChild({ stdout: '', exitCode: 0 }));
+    };
+    const processor = makeProcessorWithFakeSpawn(fakeSpawn);
+    await expect(
+      processor.handle({ path: '-c' }),
+    ).rejects.toMatchObject({ name: 'SidecarError', code: 'INVALID_PATH' });
+    expect(spawnCalled).toBe(false);
+  });
+
+  it('passes the resolved absolute path to spawn as the final argv element', async () => {
+    let captured: { cmd: string; argv: readonly string[] } | null = null;
+    const fakeSpawn: SpawnFn = (cmd, argv) => {
+      captured = { cmd, argv };
+      return toChildProcess(
+        makeFakeChild({
+          stdout: JSON.stringify({
+            schema_version: 1,
+            format: 'epub',
+            path: '/share/biblioteca/raw/books/dune.epub',
+          }) + '\n',
+          exitCode: 0,
+        }),
+      );
+    };
+    const processor = makeProcessorWithFakeSpawn(fakeSpawn);
+    await processor.handle({ path: 'books/dune.epub' });
+    expect(captured).not.toBeNull();
+    // The argv's last element must be an absolute path under the
+    // configured library root — no shell interpolation possible.
+    expect(captured!.argv).toEqual([
+      '-m',
+      'alejandria_sidecar',
+      'extract',
+      '/share/biblioteca/raw/books/dune.epub',
+    ]);
   });
 });
 

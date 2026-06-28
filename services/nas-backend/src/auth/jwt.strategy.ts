@@ -3,6 +3,30 @@ import { PassportStrategy } from '@nestjs/passport';
 import { ExtractJwt, Strategy } from 'passport-jwt';
 
 /**
+ * Resolve and validate the HMAC secret used to verify presented JWTs.
+ *
+ * Mirrors {@link resolveJwtSecret} in ``auth.module.ts`` — both
+ * sides of the JWT flow (issuance and verification) must use the
+ * same secret or signed tokens would not verify. Boot-time
+ * validation here also closes the 4R-review exposure of a public
+ * literal fallback for ``secretOrKey``.
+ */
+function resolveJwtSecretOrKey(): string {
+  const secret = process.env.NAS_JWT_SECRET;
+  if (!secret || secret.length === 0) {
+    throw new Error(
+      'NAS_JWT_SECRET is required. Set it to a random string of at least 32 bytes (256 bits) before starting alejandria-nas-backend.',
+    );
+  }
+  if (Buffer.byteLength(secret, 'utf8') < 32) {
+    throw new Error(
+      `NAS_JWT_SECRET must be at least 32 bytes (256 bits) for HS256. Got ${Buffer.byteLength(secret, 'utf8')} bytes.`,
+    );
+  }
+  return secret;
+}
+
+/**
  * Decoded JWT payload the strategy expects.
  *
  * ``sub`` is the device UUID; ``jti`` is the per-token random id
@@ -33,7 +57,7 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
     super({
       jwtFromRequest: ExtractJwt.fromAuthHeaderAsBearerToken(),
       ignoreExpiration: false,
-      secretOrKey: process.env.NAS_JWT_SECRET ?? 'dev-secret-change-me',
+      secretOrKey: resolveJwtSecretOrKey(),
     });
   }
 

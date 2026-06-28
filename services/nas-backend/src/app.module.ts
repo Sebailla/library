@@ -1,4 +1,6 @@
-import { Module } from '@nestjs/common';
+import { ArgumentsHost, Catch, ExceptionFilter, HttpException, Module } from '@nestjs/common';
+import { APP_FILTER, APP_GUARD } from '@nestjs/core';
+import { ThrottlerException, ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
 import { DatabaseModule } from './database/database.module';
 import { HealthModule } from './health/health.module';
 import { AuthModule } from './auth/auth.module';
@@ -9,6 +11,28 @@ import { SearchModule } from './search/search.module';
 import { DownloadsModule } from './downloads/downloads.module';
 import { WorkersModule } from './workers/workers.module';
 import { DiscoveryModule } from './discovery/discovery.module';
+
+/**
+ * Reshape {@link ThrottlerException} into the project's standard
+ * ``{ error: { code, message } }`` envelope so the 4R-review
+ * contract (#34) is satisfied: clients can branch on a stable
+ * ``code === 'THROTTLED'`` the same way they already do for
+ * ``BAD_PIN``, ``TOKEN_INVALID``, etc.
+ */
+@Catch(ThrottlerException)
+class ThrottlerExceptionFilter implements ExceptionFilter {
+  catch(exception: ThrottlerException, host: ArgumentsHost): void {
+    const ctx = host.switchToHttp();
+    const response = ctx.getResponse();
+    const status = exception.getStatus();
+    response.status(status).json({
+      error: {
+        code: 'THROTTLED',
+        message: exception.message,
+      },
+    });
+  }
+}
 
 /**
  * Root NestJS module for the NAS backend.
@@ -34,9 +58,30 @@ import { DiscoveryModule } from './discovery/discovery.module';
  * ``JwtAuthGuard``) because clients need it BEFORE they have a
  * bearer token; it returns the mDNS service name, HTTP port,
  * Tailscale IPv4 (or ``null``), and the host's LAN IPv4 list.
+ *
+ * Rate limiting (#34, 4R review): ``ThrottlerModule`` is
+ * registered with three named buckets (see ``throttlers`` array
+ * below) and the ``ThrottlerGuard`` is bound as a global APP_GUARD
+ * so every route is subject to its limits unless it overrides
+ * with ``@Throttle({ default: { limit, ttl } })``.
  */
 @Module({
   imports: [
+    ThrottlerModule.forRoot({
+      // Default floor (60 req / 60s) so every route is rate-
+      // limited even before the per-route @Throttle decorator
+      // kicks in. Routes that need a tighter limit (auth pair,
+      // auth refresh) override via the decorator on the
+      // controller method; discovery/info accepts the default.
+      throttlers: [
+        {
+          name: 'default',
+          limit: 60,
+          ttl: 60_000,
+        },
+      ],
+      errorMessage: 'Too many requests, please try again later.',
+    }),
     DatabaseModule,
     HealthModule,
     AuthModule,
@@ -47,6 +92,16 @@ import { DiscoveryModule } from './discovery/discovery.module';
     DownloadsModule,
     WorkersModule,
     DiscoveryModule,
+  ],
+  providers: [
+    {
+      provide: APP_GUARD,
+      useClass: ThrottlerGuard,
+    },
+    {
+      provide: APP_FILTER,
+      useClass: ThrottlerExceptionFilter,
+    },
   ],
 })
 export class AppModule {}
