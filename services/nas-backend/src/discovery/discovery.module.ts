@@ -1,11 +1,11 @@
 import { Module } from '@nestjs/common';
+import { networkInterfaces } from 'os';
 import { DiscoveryController } from './discovery.controller';
 import {
   DiscoveryService,
   LAN_IPS,
   MDNS_NAME,
   NAS_HTTP_PORT,
-  TAILSCALE_IP,
 } from './discovery.service';
 import {
   BONJOUR,
@@ -15,6 +15,11 @@ import {
   MDNS_SERVICE_PORT,
   MdnsService,
 } from './mdns.service';
+import {
+  defaultShell,
+  TAILSCALE_SHELL,
+  TailscaleService,
+} from './tailscale.service';
 
 /**
  * Discovery module — ``GET /api/discovery/info`` (PR-2F).
@@ -25,29 +30,62 @@ import {
  *
  *   - mDNS service name (published by {@link MdnsService})
  *   - HTTP port (``PORT`` env var, default 3000)
- *   - Tailscale IPv4 (probed by ``tailscale.service.ts`` — committed
- *     later in this work unit)
- *   - LAN IPv4 list (from ``os.networkInterfaces()`` — wired to an
- *     empty array until the Tailscale service commit lands; the
- *     LAN provider below is updated there to enumerate interfaces)
+ *   - Tailscale IPv4 (probed by {@link TailscaleService})
+ *   - LAN IPv4 list (from ``os.networkInterfaces()``)
  *
  * Each fact is injected through a string token so e2e tests can
  * override any of them via
  * ``Test.createTestingModule(...).overrideProvider(...)`` and the
  * service has zero hard-coded production defaults.
  *
- * The real {@link MdnsService} boots inside this module via
- * ``OnModuleInit``: it opens the Bonjour responder and publishes
- * ``_alejandria._tcp`` with the host's first LAN IP. The publish
- * is non-blocking on errors so a missing mDNS responder (e.g. a
- * QNAP container without Avahi) does NOT prevent the API from
- * serving HTTP.
+ * Both probes are non-blocking on errors: a missing mDNS responder
+ * (e.g. a QNAP container without Avahi) or a missing Tailscale CLI
+ * do NOT prevent the API from serving HTTP.
  */
+
+/**
+ * Best-effort LAN IPv4 enumerator used by the ``LAN_IPS`` provider.
+ *
+ * Returns every non-loopback IPv4 the OS reports. Falls back to
+ * ``[]`` on environments where ``os.networkInterfaces()`` is not
+ * available (e.g. restricted sandboxes) so the discovery endpoint
+ * can still answer with an empty list instead of throwing.
+ */
+function listLanIps(): string[] {
+  try {
+    const ifaces = networkInterfaces();
+    const out: string[] = [];
+    for (const list of Object.values(ifaces)) {
+      if (!list) continue;
+      for (const info of list) {
+        if (info.family === 'IPv4' && !info.internal) {
+          out.push(info.address);
+        }
+      }
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Best-effort first LAN IPv4 used as the Bonjour ``host`` field.
+ * Returns the first non-loopback IPv4 from
+ * ``os.networkInterfaces()``, or ``'0.0.0.0'`` if none is
+ * available (the responder will still come up; clients fall back
+ * to mDNS resolution).
+ */
+function firstLanIpOrDefault(): string {
+  return listLanIps()[0] ?? '0.0.0.0';
+}
+
 @Module({
   controllers: [DiscoveryController],
   providers: [
     DiscoveryService,
     MdnsService,
+    TailscaleService,
     {
       provide: MDNS_NAME,
       inject: [MdnsService],
@@ -63,27 +101,20 @@ import {
       useFactory: (port: number): number => port,
     },
     {
-      // Best-effort first LAN IPv4. Until TailscaleService lands
-      // we pin a sensible default so the Bonjour responder still
-      // gets a host string to advertise.
       provide: MDNS_SERVICE_HOST,
-      useFactory: (): string => '0.0.0.0',
+      useFactory: (): string => firstLanIpOrDefault(),
     },
     {
       provide: BONJOUR,
       useFactory: defaultBonjourFactory,
     },
     {
-      // Until TailscaleService lands in the next commit we expose
-      // ``null`` so clients can see the "Tailscale down" state.
-      provide: TAILSCALE_IP,
-      useFactory: (): string | null => null,
+      provide: TAILSCALE_SHELL,
+      useFactory: (): typeof defaultShell => defaultShell,
     },
     {
-      // Until TailscaleService lands we expose an empty LAN list.
-      // The next commit replaces this with ``os.networkInterfaces()``.
       provide: LAN_IPS,
-      useFactory: (): string[] => [],
+      useFactory: (): string[] => listLanIps(),
     },
     {
       provide: NAS_HTTP_PORT,

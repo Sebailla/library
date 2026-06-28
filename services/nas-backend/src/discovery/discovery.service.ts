@@ -1,5 +1,6 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { DiscoveryInfo } from './discovery.controller';
+import { TailscaleService } from './tailscale.service';
 
 /**
  * String tokens used by {@link DiscoveryService} to pull its inputs
@@ -14,9 +15,6 @@ import { DiscoveryInfo } from './discovery.controller';
 /** Resolved Bonjour service name the NAS publishes (``alejandria-nas.local``). */
 export const MDNS_NAME = 'NAS_MDNS_NAME';
 
-/** Resolved Tailscale IPv4 of this host, or ``null`` when Tailscale is down. */
-export const TAILSCALE_IP = 'NAS_TAILSCALE_IP';
-
 /** Non-loopback IPv4 addresses of this host. */
 export const LAN_IPS = 'NAS_LAN_IPS';
 
@@ -27,26 +25,29 @@ export const NAS_HTTP_PORT = 'NAS_HTTP_PORT';
  * Service that assembles the {@link DiscoveryInfo} payload from
  * injected dependencies.
  *
- * The service is intentionally a thin shape-mapping adapter: every
- * fact it returns comes from a string-token provider so the
- * controller can be exercised in tests without booting Bonjour or
- * the Tailscale daemon. Production wiring lives in
- * {@link DiscoveryModule}.
+ * The Tailscale probe is delegated to {@link TailscaleService}
+ * because the IP is fetched asynchronously (shell-out) and may
+ * legitimately return ``null``. The Bonjour name, HTTP port and
+ * LAN IP list are pure synchronous values read from string-token
+ * providers so they can be overridden in tests.
+ *
+ * The service is intentionally a thin shape-mapping adapter:
+ * production wiring lives in {@link DiscoveryModule}.
  */
 @Injectable()
 export class DiscoveryService {
   constructor(
     @Inject(MDNS_NAME) private readonly mdnsName: string,
-    @Inject(TAILSCALE_IP) private readonly tailscaleIp: string | null,
     @Inject(LAN_IPS) private readonly lanIps: string[],
     @Inject(NAS_HTTP_PORT) private readonly port: number,
+    private readonly tailscale: TailscaleService,
   ) {}
 
-  getInfo(): DiscoveryInfo {
+  async getInfo(): Promise<DiscoveryInfo> {
     return {
       mdns_name: this.mdnsName,
       port: this.port,
-      tailscale_ip: this.tailscaleIp,
+      tailscale_ip: await this.tailscale.getIp(),
       lan_ips: [...this.lanIps],
     };
   }

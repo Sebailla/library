@@ -6,8 +6,8 @@ import { DEVICES_REPOSITORY } from '../src/auth/devices.repository';
 import {
   LAN_IPS,
   MDNS_NAME,
-  TAILSCALE_IP,
 } from '../src/discovery/discovery.service';
+import { TAILSCALE_SHELL } from '../src/discovery/tailscale.service';
 
 /**
  * End-to-end contract tests for ``GET /api/discovery/info`` (PR-2F,
@@ -98,10 +98,22 @@ async function buildApp(overrides: {
     // not need a real Bonjour responder.
     .overrideProvider(MDNS_NAME)
     .useValue(overrides.mdnsName)
-    // Tailscale detection is wrapped behind a string token too so
-    // tests can simulate both "tailscale up" and "not installed".
-    .overrideProvider(TAILSCALE_IP)
-    .useValue(overrides.tailscaleIp)
+    // Tailscale detection is wrapped behind a string token so
+    // tests can simulate both "tailscale up" and "not installed"
+    // without spawning a real subprocess.
+    .overrideProvider(TAILSCALE_SHELL)
+    .useValue({
+      async run(_cmd: string, _args: readonly string[]): Promise<{
+        stdout: string;
+        stderr: string;
+        code: number;
+      }> {
+        if (overrides.tailscaleIp === null) {
+          return { stdout: '', stderr: '', code: 1 };
+        }
+        return { stdout: overrides.tailscaleIp, stderr: '', code: 0 };
+      },
+    })
     // LAN IP enumeration is delegated to a string token so tests
     // can pin the list deterministically.
     .overrideProvider(LAN_IPS)

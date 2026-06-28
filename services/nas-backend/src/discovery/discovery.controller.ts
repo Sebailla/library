@@ -46,7 +46,7 @@ export class DiscoveryController {
   constructor(private readonly discoveryService: DiscoveryService) {}
 
   @Get('info')
-  info(): DiscoveryInfo {
+  async info(): Promise<DiscoveryInfo> {
     return this.discoveryService.getInfo();
   }
 }
