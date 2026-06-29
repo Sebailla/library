@@ -44,25 +44,50 @@ export async function loadReader(bookId: string): Promise<React.JSX.Element> {
   cacheLife('hours')
   cacheTag(`book:${bookId}`)
 
-  const db = openLocalDb()
   let book = null
   let currentPage = 1
   let totalPages = 1
 
   try {
-    book = db.findById(bookId)
-    if (book) {
-      const progress = db.getProgress(bookId)
-      if (progress) {
-        currentPage = progress.currentPage
+    const db = openLocalDb()
+    try {
+      book = db.findById(bookId)
+      if (book) {
+        const progress = db.getProgress(bookId)
+        if (progress) {
+          currentPage = progress.currentPage
+        }
+        // Total page count is not yet persisted (PR-3B ships
+        // the scaffold only). PdfViewer will surface the file
+        // path and let pdfjs discover the page count at render
+        // time.
+        totalPages = Math.max(currentPage, 1)
       }
-      // Total page count is not yet persisted (PR-3B ships the
-      // scaffold only). PdfViewer will surface the file path and
-      // let pdfjs discover the page count at render time.
-      totalPages = Math.max(currentPage, 1)
+    } finally {
+      db.close()
     }
-  } finally {
-    db.close()
+  } catch {
+    // PR-3-fix-B #64 (CRITICAL): SQLite lock contention or
+    // corruption MUST NOT 500 the reader. Render a friendly
+    // error with a hint pointing at the recovery path
+    // documented in README § "library.sqlite corruption
+    // recovery".
+    return (
+      <main>
+        <h1>Reader temporarily unavailable</h1>
+        <p>
+          The local library database could not be opened. This
+          usually means another process holds the SQLite write
+          lock, or the database file is corrupted.
+        </p>
+        <p>
+          See the README section{' '}
+          <code>library.sqlite corruption recovery</code> for the
+          repair procedure (delete{' '}
+          <code>library.sqlite</code> and rescan).
+        </p>
+      </main>
+    )
   }
 
   if (!book) {

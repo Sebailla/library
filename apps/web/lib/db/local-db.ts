@@ -3,6 +3,19 @@ import { mkdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 
 /**
+ * Process-wide flag: did we already run `PRAGMA integrity_check`
+ * for this DB file? PR-3-fix-B #64 (CRITICAL) runs the check on
+ * the FIRST open so a corrupted `library.sqlite` surfaces a
+ * clear error early. Subsequent opens in the same process skip
+ * the check — it's O(file-size) and would degrade every read.
+ *
+ * The flag is keyed by absolute path so two DBs in the same
+ * process (e.g. a test suite that swaps `ALEJANDRIA_DATA_DIR`)
+ * each get their own first-open check.
+ */
+const integrityChecked = new Set<string>()
+
+/**
  * Local SQLite mirror of the user's library (per `local-library-db` spec).
  *
  * Single-file DB at `<ALEJANDRIA_DATA_DIR>/library.sqlite` (default
@@ -169,6 +182,24 @@ type SnakeRow = {
 }
 
 /**
+ * True when a `PRAGMA integrity_check` result indicates a
+ * healthy database. `better-sqlite3` returns the result as an
+ * array of rows; the canonical OK response is a single row
+ * containing `'ok'`.
+ */
+function isIntegrityOk(result: unknown): boolean {
+  if (!Array.isArray(result)) return false
+  if (result.length !== 1) return false
+  const first = result[0]
+  if (typeof first !== 'object' || first === null) return false
+  // The pragma returns either { integrity_check: 'ok' } or a
+  // column-named row. Accept any single-row response whose
+  // single value is the string 'ok'.
+  const values = Object.values(first as Record<string, unknown>)
+  return values.length === 1 && values[0] === 'ok'
+}
+
+/**
  * Map a snake_case DB row (returned by `better-sqlite3`) to the
  * canonical camelCase `BookRow`. The parameter type is the local
  * `SnakeRow` alias (no separate `BookRowDb` interface) so the
@@ -194,6 +225,13 @@ function rowToBook(row: SnakeRow): BookRow {
  * to any helper, so importing this module from a Server Component
  * during a build (where `process.cwd()` is fine but we don't want
  * side effects) stays safe.
+ *
+ * PR-3-fix-B #64 (CRITICAL): the FIRST open in a given process
+ * runs `PRAGMA integrity_check`. If the check fails the open
+ * throws so the caller can recover (delete the file + rescan —
+ * see README § "library.sqlite corruption recovery"). Subsequent
+ * opens in the same process skip the check; it's O(file-size)
+ * and would degrade every read.
  */
 export function openLocalDb(): LocalDb {
   const path = resolveDbPath()
@@ -202,6 +240,25 @@ export function openLocalDb(): LocalDb {
   const handle = new Database(path)
   handle.pragma('journal_mode = WAL')
   handle.pragma('foreign_keys = ON')
+
+  // First-open integrity check. ``integrity_check`` returns one
+  // row per finding — when the DB is healthy the single row is
+  // ``'ok'``. Any other response (or a thrown SqliteError)
+  // means the file is corrupt and we surface a clear error.
+  if (!integrityChecked.has(path)) {
+    const result = handle.pragma('integrity_check') as unknown
+    if (!isIntegrityOk(result)) {
+      handle.close()
+      throw new Error(
+        `library.sqlite integrity_check failed for ${path}; ` +
+          `delete the file and rescan to recover (see README § ` +
+          `"library.sqlite corruption recovery"). ` +
+          `pragma returned: ${JSON.stringify(result)}`,
+      )
+    }
+    integrityChecked.add(path)
+  }
+
   handle.exec(SCHEMA_SQL)
 
   const insertBookStmt = handle.prepare(`
