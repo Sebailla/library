@@ -73,3 +73,21 @@ export async function insertAuthor(
     return Number(res.rows[0].id);
   });
 }
+
+/**
+ * Insert a parent library row and return its id. Used by the
+ * PR-N2 contract tests that exercise the new
+ * ``books.library_id`` scoping.
+ */
+export async function insertLibrary(
+  name: string,
+  rootPath: string = `/lib/${name.toLowerCase()}`,
+): Promise<number> {
+  return withClient(async (client) => {
+    const res = await client.query<{ id: string }>(
+      'INSERT INTO libraries (name, root_path) VALUES ($1, $2) RETURNING id',
+      [name, rootPath],
+    );
+    return Number(res.rows[0].id);
+  });
+}

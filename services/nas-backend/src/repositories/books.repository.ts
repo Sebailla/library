@@ -49,6 +49,10 @@ export interface ListFilters {
   authorId?: number;
   format?: string;
   language?: string;
+  // PR-N2 — optional per-library filter. When ``undefined`` the
+  // repository does not add a ``WHERE`` clause for the column;
+  // the controller can keep the catalog-wide default view.
+  libraryId?: number;
 }
 
 /** Repository contract for the ``books`` table. */
@@ -160,7 +164,7 @@ export class PgBooksRepository implements BooksRepository {
   }
 
   async list(opts: PaginationOpts & ListFilters = {}): Promise<Book[]> {
-    const { authorId, format, language, ...pagination } = opts;
+    const { authorId, format, language, libraryId, ...pagination } = opts;
     const where: string[] = [];
     const params: unknown[] = [];
     if (authorId !== undefined) {
@@ -174,6 +178,10 @@ export class PgBooksRepository implements BooksRepository {
     if (language !== undefined) {
       params.push(language);
       where.push(`language = $${params.length}`);
+    }
+    if (libraryId !== undefined) {
+      params.push(libraryId);
+      where.push(`library_id = $${params.length}`);
     }
     const whereClause = where.length ? `WHERE ${where.join(' AND ')}` : '';
     return this.runList(
@@ -197,6 +205,10 @@ export class PgBooksRepository implements BooksRepository {
     if (filters.language !== undefined) {
       params.push(filters.language);
       where.push(`language = $${params.length}`);
+    }
+    if (filters.libraryId !== undefined) {
+      params.push(filters.libraryId);
+      where.push(`library_id = $${params.length}`);
     }
     const whereClause = where.length ? `WHERE ${where.join(' AND ')}` : '';
     const res = await this.pool.query<{ count: string }>(

@@ -6,6 +6,7 @@ import {
 import {
   DATABASE_URL,
   insertAuthor,
+  insertLibrary,
   resetAndMigrate,
 } from './_fixtures';
 
@@ -139,6 +140,101 @@ describeDb('BooksRepository', () => {
     for (let i = 1; i < all.length; i++) {
       expect(all[i].id).toBeGreaterThan(all[i - 1].id);
     }
+  });
+
+  // PR-N2 — list / count accept an optional ``libraryId`` filter
+  // so the per-library browse view stays cheap as the catalog
+  // grows. The books.repository contract widens to expose the
+  // filter; the new field is optional so existing callers
+  // continue to work unchanged.
+  it('list filters by libraryId when supplied', async () => {
+    const authorId = await insertAuthor('Author', 'C');
+    const libA = await insertLibrary('A');
+    const libB = await insertLibrary('B');
+    // Three books: two belong to libA, one to libB. The
+    // repository cannot insert library_id yet (the column is
+    // set via a follow-up UPDATE so the test pins the filter
+    // behaviour, not the insert surface).
+    const a1 = await repo.insert({
+      title: 'A-1',
+      authorId,
+      filePath: '/library/a-1.epub',
+      fileSizeBytes: 10,
+      contentHash: 'a-1',
+    });
+    const a2 = await repo.insert({
+      title: 'A-2',
+      authorId,
+      filePath: '/library/a-2.epub',
+      fileSizeBytes: 10,
+      contentHash: 'a-2',
+    });
+    const b1 = await repo.insert({
+      title: 'B-1',
+      authorId,
+      filePath: '/library/b-1.epub',
+      fileSizeBytes: 10,
+      contentHash: 'b-1',
+    });
+    // Stamp the books with their library_id via the underlying
+    // SQL so the filter test exercises the WHERE clause and
+    // not the insert surface.
+    const { withClient } = await import('./_fixtures');
+    await withClient(async (client) => {
+      await client.query('UPDATE books SET library_id = $1 WHERE id = $2', [
+        libA,
+        a1.id,
+      ]);
+      await client.query('UPDATE books SET library_id = $1 WHERE id = $2', [
+        libA,
+        a2.id,
+      ]);
+      await client.query('UPDATE books SET library_id = $1 WHERE id = $2', [
+        libB,
+        b1.id,
+      ]);
+    });
+
+    const onlyA = await repo.list({ libraryId: libA });
+    expect(onlyA).toHaveLength(2);
+    const onlyB = await repo.list({ libraryId: libB });
+    expect(onlyB).toHaveLength(1);
+    expect(onlyB[0]?.title).toBe('B-1');
+
+    // No filter: every book still surfaces.
+    const all = await repo.list();
+    expect(all).toHaveLength(3);
+  });
+
+  it('count filters by libraryId when supplied', async () => {
+    const authorId = await insertAuthor('Author', 'D');
+    const libA = await insertLibrary('A-2');
+    const libB = await insertLibrary('B-2');
+    for (const [i, title] of [0, 1, 2].entries()) {
+      await repo.insert({
+        title: `D-${title ?? i}`,
+        authorId,
+        filePath: `/library/d-${title ?? i}.epub`,
+        fileSizeBytes: 10,
+        contentHash: `d-${title ?? i}`,
+      });
+    }
+    const { withClient } = await import('./_fixtures');
+    await withClient(async (client) => {
+      await client.query(
+        'UPDATE books SET library_id = $1 WHERE id IN (SELECT id FROM books ORDER BY id ASC LIMIT 2)',
+        [libA],
+      );
+      await client.query(
+        'UPDATE books SET library_id = $1 WHERE id IN (SELECT id FROM books ORDER BY id DESC LIMIT 1)',
+        [libB],
+      );
+    });
+
+    expect(await repo.count({ libraryId: libA })).toBe(2);
+    expect(await repo.count({ libraryId: libB })).toBe(1);
+    // No filter: every book is counted.
+    expect(await repo.count()).toBe(3);
   });
 
   it('search uses pgroonga to find books by title fragment', async () => {
