@@ -4,6 +4,10 @@ All notable changes to **alejandria-v2** are documented here. The format follows
 
 ## [Unreleased]
 
+### Planned
+- PR3: Next.js 16 app shell (browse + search + reader)
+- PR4: Electron shell + iCloud Drive sync + 7-layer ISBN pipeline
+
 ### Fixed
 - **monorepo + web + nas-backend (PR-3-fix-B)**: extracted the PR-2E sidecar hardening into a shared `@alejandria/sidecar` workspace package (`sanitizePath`, `spawnSidecar`, `SPAWN_TIMEOUT_MS = 60s`, `MAX_OUTPUT_BYTES = 64 MiB`). Both `apps/web/lib/scan/local-pipeline.ts` and `services/nas-backend/src/workers/scan.processor.ts` now consume the exact same helpers, so the web side no longer reopens argv injection / unbounded stdout / hung-Python interpreter failure modes (issue #60, BLOCKER).
 - **web (PR-3-fix-B)**: `download-flow` wraps each NAS round-trip step (`getBook`, `startDownload`, `downloadFile`, `completeDownload`) in a new `withRetry({ attempts: 3, backoff: 'exp', baseMs: 250 })` helper, so a single 503/504/network drop no longer leaves a tracking row open on the NAS. Also wires resume support via `downloadBook({ start: bytesAlreadyOnDisk })` (issue #62, CRITICAL).
@@ -15,10 +19,6 @@ All notable changes to **alejandria-v2** are documented here. The format follows
 - **web (PR-3-fix-A)**: reader route at `/reader/[bookId]` now mounts the real PDF. The page previously called `<Reader book={...} />` without forwarding `book.filePath`, so the `<Reader />` Client Component's `filePath`-gated `PdfSurface` branch was dead code in production (issue #59, BLOCKER).
 - **web (PR-3-fix-A)**: `download-flow` reports the actual bytes received from the `nas-client.downloadFile` `onProgress` callback as `bytesTransferred` to the NAS — not the pre-flight `book.file_size_bytes` expected size, which diverges on partial / resumed / failed transfers (issue #65, CRITICAL).
 - **web (PR-3-fix-A)**: consolidated two conflicting `BookRow` types. The canonical 8-field DB row lives in `@/lib/db/local-db`; the component-side 4-field type is now `BookListItem` in `@/components/BookList`. The internal `BookRowDb` shim has been dropped (issue #66, BLOCKER).
-
-### Planned
-- PR3: Next.js 16 app shell (browse + search + reader)
-- PR4: Electron shell + iCloud Drive sync + 7-layer ISBN pipeline
 
 ---
 
