@@ -42,7 +42,7 @@ const { mockGetMetadata, mockGetDocument } = vi.hoisted(() => {
 })
 
 vi.mock('pdfjs-dist', () => ({
-  getDocument: (...args: unknown[]) => mockGetDocument(...args),
+  getDocument: () => mockGetDocument(),
   GlobalWorkerOptions: { workerSrc: '' },
 }))
 

@@ -28,6 +28,11 @@
 
 import type { CacheKey, IsbnCache, IsbnCandidate } from './types'
 
+// Re-export the `IsbnCache` interface from `./types` so
+// consumers can `import { IsbnCache } from './cache'`
+// without learning the types module's path.
+export type { IsbnCache } from './types'
+
 /**
  * Normalize a composite key to its canonical string form:
  *  - trim and lowercase the title, author, and format

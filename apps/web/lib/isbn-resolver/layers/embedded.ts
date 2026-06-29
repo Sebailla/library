@@ -103,13 +103,18 @@ async function extractFromPdf(
       data.byteOffset,
       data.byteOffset + data.byteLength,
     )
-    doc = await getDocument({
+    // The Node build of pdfjs-dist accepts extra options
+    // (disableWorker, isEvalSupported, verbosity) that
+    // are not in the bundled types. We cast through
+    // `unknown` so the TS check is honest about the
+    // divergence.
+    const opts = {
       data: ab,
-      // We never render pages, so we can skip the worker.
       disableWorker: true,
       isEvalSupported: false,
       verbosity: 0,
-    }).promise
+    } as unknown as Parameters<typeof getDocument>[0]
+    doc = await getDocument(opts).promise
   } catch {
     return null
   }
