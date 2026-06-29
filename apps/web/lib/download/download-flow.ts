@@ -101,10 +101,24 @@ export async function downloadBook(options: DownloadBookOptions): Promise<Downlo
 
   // 3. Stream the bytes. If anything throws here, the NAS tracking
   //    row stays open — the periodic scan worker reconciles it.
+  //
+  //    `bytesReceived` is captured from the FINAL `onProgress`
+  //    callback, which `nas-client.downloadFile` fires with the
+  //    cumulative byte count after each chunk. That value is the
+  //    ACTUAL number of bytes persisted to disk — not the
+  //    pre-flight expected size from `book.file_size_bytes`,
+  //    which can diverge on partial / failed / resumed transfers.
   await mkdir(dirname(destPath), { recursive: true })
-  await nasClient.downloadFile(bookId, destPath, (bytes) => {
-    if (onProgress) onProgress(bytes)
-  }, { writeFile })
+  let bytesReceived = 0
+  await nasClient.downloadFile(
+    bookId,
+    destPath,
+    (bytes) => {
+      bytesReceived = bytes
+      if (onProgress) onProgress(bytes)
+    },
+    { writeFile },
+  )
 
   // 4. Insert the local row so the Reader can find the book.
   const db = openDb()
@@ -113,17 +127,20 @@ export async function downloadBook(options: DownloadBookOptions): Promise<Downlo
     db.close()
   }
 
-  // 5. Close the tracking row.
+  // 5. Close the tracking row with the ACTUAL byte count. If the
+  //    transfer produced zero bytes (e.g. an empty 200 response
+  //    or a write that threw after partial progress), report 0
+  //    rather than the pre-flight expected size.
   const tracking = await nasClient.completeDownload(trackingStart.download_id, {
     completed: true,
-    bytesTransferred: book.file_size_bytes ?? 0,
+    bytesTransferred: bytesReceived,
   })
 
   return {
     book,
     downloadId: trackingStart.download_id,
     filePath: localRow.filePath,
-    bytesTransferred: tracking.bytes_transferred,
+    bytesTransferred: bytesReceived,
     tracking,
     trackingStart,
   }

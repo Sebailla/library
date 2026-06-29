@@ -84,16 +84,19 @@ function makeMockNasClient(
         : async (
             _bookId: number,
             destPath: string,
-            _onProgress: (bytes: number) => void,
+            onProgress: (bytes: number) => void,
             downloadOptions: { writeFile?: (path: string, data: Uint8Array) => Promise<void> } = {},
           ) => {
             // The real nas-client's `downloadFile` delegates the
-            // body write to the injected writer. Mirror that here
-            // so the test can assert on the bytes path the
-            // production code chooses.
+            // body write to the injected writer AND fires
+            // `onProgress(totalBytes)` after the chunk has been
+            // materialised. Mirror that here so the test can assert
+            // on the bytes path the production code chooses.
             const writeFile = downloadOptions.writeFile
+            const payload = new Uint8Array([1, 2, 3, 4, 5])
+            onProgress(payload.byteLength)
             if (writeFile) {
-              await writeFile(destPath, new Uint8Array([1, 2, 3, 4, 5]))
+              await writeFile(destPath, payload)
             }
           },
     ),
