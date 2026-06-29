@@ -97,12 +97,24 @@ export interface CacheKey {
  * so the layer signature stays the same regardless of
  * whether we are in a server component, a worker, or a
  * test.
+ *
+ * Layer-specific overrides (`unlimitedOcrEndpoint`,
+ * `nationalLibraryEndpoints`) keep the per-layer config
+ * beside the cache without forcing every caller to
+ * understand the details of every layer.
  */
 export interface LayerContext {
   cache: IsbnCache
   fetch?: typeof fetch
   abortSignal?: AbortSignal
+  /** Layer-6 override; falls back to UNLIMITED_OCR_ENDPOINT. */
+  unlimitedOcrEndpoint?: string
+  /** Layer-7 endpoint overrides keyed by provider id. */
+  nationalLibraryEndpoints?: Partial<Record<NationalLibraryId, string>>
 }
+
+/** Known national-library provider ids (PR-4A). */
+export type NationalLibraryId = 'loc' | 'bne' | 'bn-argentina'
 
 /** A single resolution layer. */
 export type Layer = (
