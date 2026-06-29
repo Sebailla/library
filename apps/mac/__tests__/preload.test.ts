@@ -41,11 +41,16 @@ describe('preload — window.alejandria surface (PR-4C)', () => {
 
   it('exposes window.alejandria via contextBridge.exposeInMainWorld', async () => {
     const { expose } = await import('../src/preload')
-    expose()
 
-    expect(exposeInMainWorld).toHaveBeenCalledTimes(1)
-    expect(exposeInMainWorld).toHaveBeenCalledWith(
-      'alejandria',
+    // Note: the preload module auto-publishes the bridge on import
+    // (Electron behaviour). Calling `expose()` again is idempotent —
+    // it MUST just re-publish the same frozen surface. We assert the
+    // bridge was published AT LEAST once with the required shape,
+    // not a hard call count.
+    expect(exposeInMainWorld).toHaveBeenCalled()
+    const lastCall = exposeInMainWorld.mock.calls.at(-1)!
+    expect(lastCall[0]).toBe('alejandria')
+    expect(lastCall[1]).toEqual(
       expect.objectContaining({
         download: expect.any(Function),
         sync: expect.any(Function),
@@ -53,6 +58,9 @@ describe('preload — window.alejandria surface (PR-4C)', () => {
         version: expect.any(Function),
       }),
     )
+
+    // And `expose()` MUST be re-callable without throwing.
+    expect(() => expose()).not.toThrow()
   })
 
   it('download(bookId) invokes the aleja:download IPC channel with the book id', async () => {
