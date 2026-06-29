@@ -28,8 +28,9 @@ biblioteca-v2/
 | PR2 | NAS NestJS backend (`services/nas-backend/`) | Merged |
 | PR-3A | Next.js 16 scaffold + RSC catalog browse (`apps/web/`) | Merged |
 | PR-3B | Real local SQLite + FTS5 + scan pipeline + PDF reader (`apps/web/`) | Merged |
-| PR-3C | NAS client + Range-request download + server actions + pdfjs (`apps/web/`) | **This PR** |
-| PR4 | Electron shell + iCloud Drive + 7-layer ISBN | Pending |
+| PR-3C | NAS client + Range-request download + server actions + pdfjs (`apps/web/`) | Merged |
+| PR-4A | 7-layer ISBN resolution pipeline (`apps/web/lib/isbn-resolver/`) | **This PR** |
+| PR4 | Electron shell + iCloud Drive (full PR4) | Pending |
 
 ## Running `apps/web/` (PR-3C)
 
@@ -255,6 +256,106 @@ into the local SQLite. The spawn step is injected via
   tests. `vitest.config.ts` aliases `@/*` to the project root so
   the tests can import the same paths the source uses.
 - ESLint via `eslint-config-next`.
+
+## ISBN resolution pipeline (PR-4A, issue #71)
+
+`apps/web/lib/isbn-resolver/` ships the 7-layer ISBN
+resolution chain mandated by the
+`isbn-resolution-pipeline` spec. The pipeline tries
+each layer in priority order, stops at the first
+checksum-valid hit, and never propagates layer errors
+(the chain is supposed to fall through).
+
+| # | Layer | Source | Confidence | Format |
+|---|-------|--------|-----------|--------|
+| 1 | Embedded metadata (XMP / OPF) | file | 1.0 | PDF, EPUB |
+| 2 | Regex over first 50k chars of text | file | 0.9 | any |
+| 3 | OpenLibrary search by title + author | API | 0.8 | any |
+| 4 | Google Books search by title + author | API | 0.75 / 0.7 | any |
+| 5 | Apple Vision OCR on cover | provider | 0.7 | PDF, EPUB |
+| 6 | Unlimited-OCR cloud (Baidu) | API | 0.7 | any |
+| 7 | National libraries (LoC, BNE, BN Argentina) | API | 0.6 | any |
+
+The orchestrator (`lib/isbn-resolver/resolve.ts`) is
+the only place that knows the layer order. It consults
+an in-memory cache keyed by
+`(title, author, format)` at the start of every call,
+short-circuiting the whole chain on a hit. Failures are
+NOT cached — the spec's monthly re-attempt needs a
+fresh chance to succeed.
+
+### Public surface
+
+```ts
+import {
+  createIsbnResolver,
+  resolve,
+  createInMemoryIsbnCache,
+  isValidIsbn10,
+  isValidIsbn13,
+  normalizeIsbn,
+} from '@/lib/isbn-resolver'
+
+// Recommended: factory wires the default cache + 7-layer chain.
+const resolver = createIsbnResolver()
+const meta = await resolver.resolve({
+  title: 'Ficciones',
+  author: 'Jorge Luis Borges',
+  format: 'epub',
+  filePath: '/library/borges/ficciones.epub',
+})
+// meta.isbn === '9788437624747' (from OpenLibrary, layer 3)
+// meta.isbnSource === 'openlibrary'
+
+// Direct: pass your own cache and layer overrides.
+const cache = createInMemoryIsbnCache()
+const meta2 = await resolve(
+  { title, author, format, filePath },
+  { cache, /* optional layers, fetch, endpoints */ },
+)
+```
+
+### Layer testability
+
+Every layer is a pure function
+`(book, ctx) => Promise<IsbnCandidate | null>` and is
+tested in isolation:
+
+- `embedded.ts` — pdfjs-dist for PDF + a dependency-free
+  EPUB zip walker for OPF. Mocks the `pdfjs-dist`
+  document via `vi.mock`; the EPUB path uses a
+  hand-built zip in a real temp file.
+- `regex.ts` — pure string helper, no I/O.
+- `openlibrary.ts` / `google-books.ts` —
+  `ctx.fetch` is injected so tests stay network-free.
+- `vision-ocr.ts` / `unlimited-ocr.ts` /
+  `national-libraries.ts` — provider seams so the
+  Mac-specific Apple Vision / Baidu / national library
+  calls are pluggable; the production defaults are
+  stubs that return `null` until PR-1 wires the real
+  bindings.
+
+### Validation (single source of truth)
+
+`lib/isbn-resolver/validate.ts` is the only module
+that knows the ISBN-10 / ISBN-13 check-digit
+algorithms. Every layer routes its candidate through
+`normalizeIsbn`, which:
+
+- Strips dashes and spaces.
+- Uppercases a trailing `x` in ISBN-10.
+- Validates the check digit.
+- Converts ISBN-10 → ISBN-13 with a recomputed check
+  digit (prefix `978`).
+
+The cache and the future `isbn_resolutions` table only
+ever see valid ISBN-13s.
+
+### Environment variables
+
+| Var | Used by | Behavior |
+|-----|---------|----------|
+| `UNLIMITED_OCR_ENDPOINT` | Layer 6 | When unset, layer 6 is skipped silently. |
 
 ## Observability (PR-3-fix-C, #61)
 
