@@ -180,12 +180,33 @@ export interface INasClient {
   ): Promise<void>
 }
 
+/**
+ * Default hard cap on downloaded bytes per `downloadFile` call
+ * (PR-3-fix-B, issue #63). The cap is enforced per-call so a
+ * single misconfigured NAS endpoint cannot OOM the Server Action
+ * via a streaming 5 GB response. Operators can lower the cap per
+ * deployment by setting `ALEJANDRIA_MAX_DOWNLOAD_BYTES`.
+ */
+export const MAX_DOWNLOAD_BYTES = 1024 * 1024 * 1024
+
 /** Options for {@link INasClient.downloadFile}. */
 export interface DownloadFileOptions {
-  /** Writer used to persist the body. Defaults to `node:fs/promises.writeFile`. */
+  /** Writer used to persist the body. Defaults to `node:fs/promises.writeFile`. Invoked PER chunk, not once with the full body. */
   writeFile?: (path: string, data: Uint8Array) => Promise<void>
-  /** Start byte for the Range header (defaults to 0). */
+  /** Start byte for the Range header (defaults to 0). Cumulative progress includes `start`. */
   start?: number
+  /**
+   * Hard cap on cumulative bytes (default `MAX_DOWNLOAD_BYTES`).
+   * On overflow the helper rejects with
+   * `DownloadOverflowError(code='DOWNLOAD_OVERFLOW')` and
+   * deletes the partial destination file.
+   */
+  maxBytes?: number
+  /**
+   * Override the unlink seam used to delete partial files on
+   * overflow. Defaults to `node:fs/promises.unlink`.
+   */
+  unlink?: (path: string) => Promise<void>
 }
 
 /**
@@ -281,57 +302,78 @@ async function sendJson<T>(state: NasClientState, path: string, options: Request
 }
 
 /**
- * Drain a `Response.body` into a single `Uint8Array` while
- * invoking `onProgress` per chunk.
+ * Drain a `Response.body` chunk-by-chunk, invoking the injected
+ * writer PER chunk and reporting the cumulative byte count via
+ * `onProgress`. PR-3-fix-B (#63, CRITICAL): the OLD implementation
+ * concatenated the entire body into a single `Uint8Array` and
+ * only then wrote it to disk — a 5 GB response OOMs the Server
+ * Action. The streaming variant keeps memory pressure bounded
+ * to one network chunk at a time and enforces a hard ceiling via
+ * `maxBytes` (default `MAX_DOWNLOAD_BYTES = 1 GiB`).
  *
- * The implementation is intentionally tiny: we do not depend on
- * Node streams (the client also runs in the renderer during PR-4)
- * and we do not care about backpressure here because the
- * destination is a `node:fs` write owned by the caller. The
- * resumable transport (Range header + chunked writer) lives in
- * `lib/download/range-client.ts`; this method just materialises
- * the body and reports bytes received.
+ * On overflow the helper rejects with a `DownloadOverflowError`
+ * (code `DOWNLOAD_OVERFLOW`) and calls `unlink` (if provided) so
+ * a failed retry doesn't leave stale bytes that look like
+ * progress.
  */
-async function drainToBuffer(
+class DownloadOverflowError extends Error {
+  readonly code = 'DOWNLOAD_OVERFLOW'
+  constructor(public readonly limit: number, public readonly received: number) {
+    super(
+      `download overflow: response body exceeded ${limit} bytes (received ${received})`,
+    )
+    this.name = 'DownloadOverflowError'
+  }
+}
+
+async function drainToFile(
   response: Response,
+  destPath: string,
+  start: number,
   onProgress: (bytes: number) => void,
-): Promise<Uint8Array> {
+  writeFile: (path: string, data: Uint8Array) => Promise<void>,
+  maxBytes: number,
+  unlink: ((path: string) => Promise<void>) | null,
+): Promise<number> {
   if (!response.body) {
-    return new Uint8Array()
+    return 0
   }
   const reader = response.body.getReader()
-  const chunks: Uint8Array[] = []
-  let total = 0
+  let cumulative = start
   try {
     while (true) {
       const result = (await reader.read()) as { done: boolean; value?: Uint8Array }
       if (result.done) break
       const value = result.value
       if (!value) continue
-      chunks.push(value)
-      total += value.byteLength
-      onProgress(total)
+      cumulative += value.byteLength
+      if (cumulative > maxBytes) {
+        if (unlink) {
+          try {
+            await unlink(destPath)
+          } catch {
+            /* best-effort cleanup */
+          }
+        }
+        throw new DownloadOverflowError(maxBytes, cumulative)
+      }
+      await writeFile(destPath, value)
+      onProgress(cumulative)
     }
   } finally {
     reader.releaseLock()
   }
-  if (chunks.length === 0) return new Uint8Array()
-  if (chunks.length === 1) {
-    const only = chunks[0]!
-    if (only.byteLength === total) return only
-  }
-  const out = new Uint8Array(total)
-  let offset = 0
-  for (const chunk of chunks) {
-    out.set(chunk, offset)
-    offset += chunk.byteLength
-  }
-  return out
+  return cumulative
 }
 
 const defaultDownloadWriter = async (path: string, data: Uint8Array): Promise<void> => {
   const { writeFile } = await import('node:fs/promises')
   await writeFile(path, data)
+}
+
+const defaultUnlink = async (path: string): Promise<void> => {
+  const { unlink } = await import('node:fs/promises')
+  await unlink(path)
 }
 
 /**
@@ -448,6 +490,7 @@ export function createNasClient(options: NasClientOptions = {}): INasClient {
       options: DownloadFileOptions = {},
     ): Promise<void> {
       const start = options.start ?? 0
+      const maxBytes = options.maxBytes ?? MAX_DOWNLOAD_BYTES
       const url = `${state.baseUrl}/api/files/${bookId}`
       const headers: Record<string, string> = {
         range: `bytes=${start}-`,
@@ -460,8 +503,21 @@ export function createNasClient(options: NasClientOptions = {}): INasClient {
         throw describeError(response.status, null)
       }
       const writeFile = options.writeFile ?? defaultDownloadWriter
-      const bytes = await drainToBuffer(response, onProgress)
-      await writeFile(destPath, bytes)
+      const unlink = options.unlink ?? defaultUnlink
+      // PR-3-fix-B #63: stream chunks directly to disk via the
+      // injected writer (one call per chunk) and enforce the
+      // MAX_DOWNLOAD_BYTES cap. The pre-PR code concatenated the
+      // entire body into a single Uint8Array and OOMed on any
+      // response above the JS heap limit.
+      await drainToFile(
+        response,
+        destPath,
+        start,
+        onProgress,
+        writeFile,
+        maxBytes,
+        unlink,
+      )
     },
   }
 }

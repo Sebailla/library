@@ -12,17 +12,37 @@ import { PairWithNasForm } from './PairWithNasForm'
  * `cacheLife('hours')` plus the `local-library` tag is the contract
  * the `nextjs-app-shell` spec requires for catalog reads, so the
  * downstream page can hand it straight into `'use cache'`.
+ *
+ * PR-3-fix-B #64 (CRITICAL): the read is wrapped in try/catch so
+ * a SQLite lock contention / corruption / permission-denied error
+ * 500s the route. The empty list renders the empty-state CTA,
+ * keeping the page reachable for the user to recover (see the
+ * README's corruption-recovery section).
+ *
+ * Exported so the integration test in
+ * `app/(catalog)/__tests__/catalog-page.test.tsx` can drive it
+ * directly without going through the React render cycle.
  */
-async function loadCatalog(): Promise<readonly { id: string; title: string; author: string; year: number }[]> {
+export async function loadCatalog(): Promise<readonly { id: string; title: string; author: string; year: number }[]> {
   'use cache'
   cacheLife('hours')
   cacheTag('local-library')
 
-  const db = openLocalDb()
   try {
-    return db.listBooks()
-  } finally {
-    db.close()
+    const db = openLocalDb()
+    try {
+      return db.listBooks()
+    } finally {
+      db.close()
+    }
+  } catch {
+    // SQLite lock contention or corruption. Mirrors the
+    // (nas)/browse/page.tsx pattern: render an empty list so
+    // the route stays reachable instead of 500ing. Operators
+    // can recover by deleting `<ALEJANDRIA_DATA_DIR>/library.sqlite`
+    // and re-scanning — see README "library.sqlite corruption
+    // recovery".
+    return []
   }
 }
 
