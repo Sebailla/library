@@ -26,6 +26,10 @@ const SAMPLE_BOOK = {
   title: 'Ficciones',
   author: 'Jorge Luis Borges',
   year: 1944,
+  format: 'pdf',
+  filePath: '/library/borges/ficciones.pdf',
+  contentHash: 'sha256:abc',
+  excerpt: 'Cuentos que desdibujan la realidad.',
 }
 
 describe('BookDownloadForm (PR-3C)', () => {

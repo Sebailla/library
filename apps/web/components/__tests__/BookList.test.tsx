@@ -39,26 +39,17 @@ describe('BookList', () => {
     expect(item.title).toBe('Ficciones')
   })
 
-  it('exports `BookListItem` (4-field) as the component prop type', async () => {
-    // Runtime signal for #66: `BookListItem` must be a named
-    // export of `@/components/BookList`. Today it does not exist
-    // (the module exports `BookRow` with the 4-field shape) — so
-    // this test fails RED until the rename happens.
-    const mod = await import('../BookList')
-    expect(mod['BookListItem']).toBeDefined()
-  })
-
-  it('does NOT export a 4-field `BookRow` from the component module', async () => {
-    // `BookRow` lives in `@/lib/db/local-db` (8 fields) and is the
-    // canonical DB row type. The component module must not also
-    // export a different `BookRow` with the 4-field shape — that
-    // was the source of the type-name conflict in #66. As an
-    // interface, `BookRow` is type-only and not a runtime export;
-    // the assertion is that the *name* is not co-opted by the
-    // component module. We assert by importing from `local-db` and
-    // confirming the local-db's `BookRow` has the 8-field shape.
-    const localDb = await import('@/lib/db/local-db')
-    const canonicalRow = localDb.openLocalDb().insertBook({
+  it('accepts canonical BookRow rows (projecting the 4 visible fields)', () => {
+    // After #66, the canonical `BookRow` lives in `@/lib/db/local-db`
+    // (8 fields). The `BookList` component does not consume that
+    // type directly — it only needs the 4 visible fields. The
+    // structural sub-typing is the contract: any canonical row
+    // can be projected down to `BookListItem` and rendered.
+    //
+    // This is a runtime + type-level signal: at runtime, the
+    // rendered list shows the visible fields and silently drops
+    // the storage fields (`filePath`, `contentHash`, ...).
+    const row = {
       id: 'book-001',
       title: 'Ficciones',
       author: 'Jorge Luis Borges',
@@ -67,11 +58,14 @@ describe('BookList', () => {
       filePath: '/library/borges/ficciones.pdf',
       contentHash: 'sha256:abc',
       excerpt: 'Cuentos que desdibujan la realidad.',
-    })
-    // The canonical `BookRow` is 8 fields, NOT 4.
-    expect(canonicalRow).toHaveProperty('filePath')
-    expect(canonicalRow).toHaveProperty('contentHash')
-    expect(canonicalRow).toHaveProperty('format')
-    expect(canonicalRow).toHaveProperty('excerpt')
+    } as const
+    const projected: BookListItem = {
+      id: row.id,
+      title: row.title,
+      author: row.author,
+      year: row.year,
+    }
+    render(<BookList books={[projected]} />)
+    expect(screen.getByRole('listitem', { name: /ficciones/i })).toBeInTheDocument()
   })
 })

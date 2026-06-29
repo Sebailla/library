@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { render, screen } from '@testing-library/react'
 
+import type { BookRow } from '@/lib/db/local-db'
 import { Reader } from '../Reader'
 
 /**
@@ -19,7 +20,7 @@ import { Reader } from '../Reader'
  * e2e) will provide.
  */
 
-const sampleBook = {
+const sampleBook: BookRow = {
   id: 'book-001',
   title: 'Ficciones',
   author: 'Jorge Luis Borges',
