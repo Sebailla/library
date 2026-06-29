@@ -1,0 +1,36 @@
+{
+  "name": "@alejandria/mac",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Electron 33 shell for alejandria-v2. Hosts the Next.js web UI, exposes window.alejandria IPC bridge, and supervises the Python sidecar. PR-4C.",
+  "license": "Proprietary",
+  "main": "dist/main.js",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "dev": "electron-forge start",
+    "build": "tsc -p tsconfig.build.json",
+    "start": "electron-forge start",
+    "package": "electron-forge package",
+    "make": "electron-forge make",
+    "lint": "eslint src",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "electron-squirrel-startup": "^1.0.1",
+    "electron-updater": "^6.3.9"
+  },
+  "devDependencies": {
+    "@electron-forge/cli": "^7.5.0",
+    "@electron-forge/maker-dmg": "^7.5.0",
+    "@electron-forge/maker-zip": "^7.5.0",
+    "@types/node": "^20.19.43",
+    "electron": "^33.0.0",
+    "eslint": "^9.16.0",
+    "typescript": "^5.5.4",
+    "vitest": "^2.1.8"
+  }
+}
