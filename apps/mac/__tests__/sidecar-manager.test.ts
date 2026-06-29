@@ -1,4 +1,5 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
+import type { ChildProcess } from 'node:child_process'
 
 /**
  * TDD tests for `src/sidecar-manager.ts` (PR-4C, issue #75).
@@ -27,7 +28,8 @@ interface FakeChild {
   emit: (event: string, ...args: unknown[]) => boolean
 }
 
-function makeFakeChild(pid: number): FakeChild {
+function makeFakeChild(pid: number, opts: { autoExitOnKill?: boolean } = {}): FakeChild {
+  const autoExit = opts.autoExitOnKill ?? true
   const listeners = new Map<string, Array<(...args: unknown[]) => void>>()
   const child: FakeChild = {
     pid,
@@ -36,6 +38,11 @@ function makeFakeChild(pid: number): FakeChild {
     kill: vi.fn((sig: string) => {
       child.killed = true
       child.signal = sig
+      if (autoExit) {
+        // Simulate the kernel reaping the process: emit 'exit' on
+        // the next microtask so the manager's 'exit' listener fires.
+        queueMicrotask(() => child.emit('exit', 0, sig))
+      }
       return true
     }),
     on: vi.fn((event: string, cb: (...args: unknown[]) => void) => {
@@ -80,7 +87,7 @@ describe('sidecar-manager (PR-4C)', () => {
   it('spawns the sidecar on the first getProcess() call and reuses the same child', async () => {
     const { SidecarManager } = await import('../src/sidecar-manager')
     const fake = makeFakeChild(4242)
-    const spawn = vi.fn(() => fake)
+    const spawn = vi.fn(() => fake as unknown as ChildProcess)
 
     const mgr = new SidecarManager({ command: 'python', args: ['-m', 'sidecar'], spawn })
     const first = await mgr.getProcess()
@@ -95,7 +102,7 @@ describe('sidecar-manager (PR-4C)', () => {
   it('kill() sends SIGTERM to the child and resolves', async () => {
     const { SidecarManager } = await import('../src/sidecar-manager')
     const fake = makeFakeChild(7777)
-    const spawn = vi.fn(() => fake)
+    const spawn = vi.fn(() => fake as unknown as ChildProcess)
 
     const mgr = new SidecarManager({ command: 'python', args: ['-m', 'sidecar'], spawn })
     await mgr.getProcess()
@@ -108,7 +115,7 @@ describe('sidecar-manager (PR-4C)', () => {
   it('kill() is idempotent — calling it twice does not throw', async () => {
     const { SidecarManager } = await import('../src/sidecar-manager')
     const fake = makeFakeChild(8888)
-    const spawn = vi.fn(() => fake)
+    const spawn = vi.fn(() => fake as unknown as ChildProcess)
 
     const mgr = new SidecarManager({ command: 'python', args: ['-m', 'sidecar'], spawn })
     await mgr.getProcess()
@@ -121,7 +128,9 @@ describe('sidecar-manager (PR-4C)', () => {
 
   it('kill() before any getProcess() call is a no-op', async () => {
     const { SidecarManager } = await import('../src/sidecar-manager')
-    const spawn = vi.fn()
+    const spawn = vi.fn(
+      () => ({}) as unknown as ChildProcess,
+    )
 
     const mgr = new SidecarManager({ command: 'python', args: ['-m', 'sidecar'], spawn })
     await expect(mgr.kill()).resolves.toBeUndefined()
@@ -130,10 +139,11 @@ describe('sidecar-manager (PR-4C)', () => {
 
   it('force-kills the child with SIGKILL if it has not exited within 5s', async () => {
     const { SidecarManager } = await import('../src/sidecar-manager')
-    const fake = makeFakeChild(9999)
-    // kill() does not actually exit the child in this fake, so the
-    // manager MUST escalate to SIGKILL after the grace period.
-    const spawn = vi.fn(() => fake)
+    // `autoExitOnKill: false` simulates a hung sidecar that
+    // ignores SIGTERM — the manager MUST escalate to SIGKILL
+    // after the grace period.
+    const fake = makeFakeChild(9999, { autoExitOnKill: false })
+    const spawn = vi.fn(() => fake as unknown as ChildProcess)
 
     const mgr = new SidecarManager({ command: 'python', args: ['-m', 'sidecar'], spawn })
     await mgr.getProcess()
