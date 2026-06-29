@@ -28,6 +28,8 @@ NestJS application that backs the **alejandria-v2** NAS catalog.
 > - **PR-2F** — `DiscoveryModule` (mDNS + Tailscale)
 > - **PR-N1** — `FilesModule` (`GET /api/files/:id` with HTTP Range,
 >   `HEAD /api/files/:id` for resumable downloads)
+> - **PR-N2** — `LibrariesModule` (`/api/libraries/*` CRUD + per-device
+>   active library, `books.library_id` scoping on the catalog queries)
 
 ## Stack
 
@@ -46,9 +48,9 @@ NestJS application that backs the **alejandria-v2** NAS catalog.
 services/nas-backend/
 ├── src/
 │   ├── main.ts                # NestJS bootstrap
-│   ├── app.module.ts          # root module (Database + Health + Auth + Me + Books + Files + ...)
+│   ├── app.module.ts          # root module (Database + Health + Auth + Me + Books + Files + Libraries + ...)
 │   ├── database/              # PR-2B — Postgres pool + DatabaseModule
-│   ├── repositories/          # PR-2B — books, categories, sagas, downloads
+│   ├── repositories/          # PR-2B + PR-N2 — books, categories, sagas, downloads
 │   ├── auth/                  # PR-2C — AuthModule, JWT, devices repo
 │   │   ├── auth.module.ts
 │   │   ├── auth.controller.ts # POST /api/auth/pair, POST /api/auth/refresh
@@ -65,6 +67,13 @@ services/nas-backend/
 │   │   ├── files.service.ts   # parseRangeHeader, resolveBookFilePath,
 │   │   │                       # streamFile
 │   │   └── files.types.ts     # RangeSpec, RangeParseError, FORMAT_TO_MIME
+│   ├── libraries/             # PR-N2 — multi-library registry
+│   │   ├── libraries.module.ts   # wires controller + service + repository
+│   │   ├── libraries.controller.ts # GET/POST /api/libraries, GET/PATCH/DELETE /:id, PUT /:id/active
+│   │   ├── libraries.service.ts   # creator-only authz + LIBRARY_NOT_EMPTY
+│   │   ├── libraries.repository.ts # PgLibrariesRepository + LIBRARIES_REPOSITORY token
+│   │   ├── libraries.adapters.ts # PgLibraryBookCountAdapter, PgDeviceLookupAdapter
+│   │   └── libraries.types.ts  # Library, NewLibrary, LibraryPatch, DeviceLibrary
 │   └── health/
 │       ├── health.controller.ts
 │       ├── health.module.ts
@@ -180,6 +189,9 @@ Coverage:
 | Bilingual category seed (migration 009) | `/ciencia`, `/arte`, `/literatura` present with `parent_id` wired |
 | `BooksRepository` insert + findById | round-trip |
 | `BooksRepository` listByAuthor + pagination + search | returns only matching rows |
+| `BooksRepository` list / count with `libraryId` filter | narrows to a single library |
+| `LibrariesRepository` insert / findById / list / update / delete | round-trip every CRUD method |
+| `LibrariesRepository` setActiveForDevice + getActiveForDevice | at most one active library per device |
 | `CategoriesRepository` findSubtree | recursive CTE returns root + every descendant |
 | `SagasRepository` attachBook + listByAuthor | idempotent attach, per-author filter |
 | `DownloadsRepository` insert + markCompleted + listByDevice | ordered by `downloaded_at DESC` |
@@ -206,6 +218,18 @@ Coverage:
 | `GET /api/me` valid Bearer | `200` `{device_id, device_name}` |
 | `GET /api/me` tampered Bearer | `401` `error.code = TOKEN_INVALID` |
 | Migration runner — `010_devices.sql` applied | `devices` table has the documented columns |
+| Migration runner — `012-014` applied | `libraries` + `device_libraries` + `books.library_id` exist with the documented shape |
+| `GET /api/libraries` no Bearer | `401` `error.code = UNAUTHORIZED` |
+| `GET /api/libraries` valid Bearer | `200` `[]` when empty, snake_case DTOs when populated |
+| `POST /api/libraries` valid Bearer | `201` LibraryDto with `created_by_device_id` stamped |
+| `POST /api/libraries` empty `name` | `400` from global ValidationPipe |
+| `GET /api/libraries/:id` missing | `404` `error.code = NOT_FOUND` |
+| `PATCH /api/libraries/:id` not the creator | `403` `error.code = FORBIDDEN` |
+| `PATCH /api/libraries/:id` empty body | `404` `error.code = EMPTY_PATCH` |
+| `DELETE /api/libraries/:id` not the creator | `403` `error.code = FORBIDDEN` |
+| `DELETE /api/libraries/:id` books still indexed | `409` `error.code = LIBRARY_NOT_EMPTY` |
+| `DELETE /api/libraries/:id` empty + creator | `204` and the row vanishes |
+| `PUT /api/libraries/:id/active` missing | `404` `error.code = NOT_FOUND` |
 
 ## Environment variables
 
@@ -234,10 +258,11 @@ openssl rand -base64 16   # → NAS_PAIR_PIN  (>= 8 chars)
 
 ## What's NOT here yet
 
-PR-2D + PR-2E + PR-2F + PR-N1 ship the catalog HTTP slice, the
-downloads tracking endpoints, the BullMQ workers that consume
-the Python sidecar, the mDNS + Tailscale discovery module, and
-the Range-aware files streaming endpoint. See
+PR-2D + PR-2E + PR-2F + PR-N1 + PR-N2 ship the catalog HTTP
+slice, the downloads tracking endpoints, the BullMQ workers
+that consume the Python sidecar, the mDNS + Tailscale
+discovery module, the Range-aware files streaming endpoint,
+and the multi-library registry. See
 `openspec/changes/alejandria-v2/tasks.md` Phase 2 for the full
 list.
 
@@ -487,6 +512,102 @@ token). The module is read-only against the books table — it
 looks up `books.file_path` and streams from disk; it never
 mutates a book row.
 
+## Libraries (PR-N2)
+
+PR-N2 closes the multi-library registry gap: the NAS now owns
+a `libraries` table that every book row can be scoped to, and
+each paired device picks one of the available libraries as
+its active browsing target. The HTTP surface is CRUD over
+`/api/libraries/*`; the per-device activation flag is
+stored in the `device_libraries` join table.
+
+```
+GET    /api/libraries               (Bearer required)
+  → 200 [LibraryDto, …]            ordered by id ASC
+  401:  { error: { code: 'UNAUTHORIZED' } }
+
+POST   /api/libraries               (Bearer required)
+  Body: { name: string, root_path: string }
+  → 201 LibraryDto
+  400:  empty/missing fields (global ValidationPipe)
+  401:  { error: { code: 'UNAUTHORIZED' } }
+
+GET    /api/libraries/:id           (Bearer required)
+  → 200 LibraryDto
+  404:  { error: { code: 'NOT_FOUND', message: 'Library not found' } }
+
+PATCH  /api/libraries/:id           (Bearer required)
+  Body: { name?: string, root_path?: string }   (at least one field)
+  → 200 LibraryDto
+  403:  caller is not the creator → { error: { code: 'FORBIDDEN', … } }
+  404:  { error: { code: 'NOT_FOUND' } }     row missing
+  404:  { error: { code: 'EMPTY_PATCH' } }   body has no fields
+
+DELETE /api/libraries/:id           (Bearer required)
+  → 204
+  403:  { error: { code: 'FORBIDDEN', … } }   caller is not the creator
+  404:  { error: { code: 'NOT_FOUND' } }      row missing
+  409:  { error: { code: 'LIBRARY_NOT_EMPTY', … } }   books still indexed
+
+PUT    /api/libraries/:id/active    (Bearer required)
+  → 200 LibraryDto
+  404:  { error: { code: 'NOT_FOUND' } }      row missing
+```
+
+The wire DTO is snake_case to match the rest of the API:
+
+```jsonc
+{
+  "id": 1,
+  "name": "Borges, Jorge Luis",
+  "root_path": "/share/biblioteca/raw/borges",
+  "created_by_device_id": "f2a3…",   // null for admin-imported rows
+  "created_at": "2026-06-29T22:45:00.000Z"
+}
+```
+
+### Authorisation model
+
+- **CREATE** is open to every paired device. The new row is
+  stamped with the caller's `device_id` so PATCH/DELETE can
+  match it later. There is no "library admin" role in this
+  slice — admin overrides (e.g. a SQL import) set
+  `created_by_device_id = NULL`, and only operators with DB
+  access can mutate those rows.
+- **PATCH** and **DELETE** are creator-only. The service
+  throws `ForbiddenException` (HTTP 403) when
+  `library.created_by_device_id !== req.device.deviceId`.
+- **DELETE** is refused with 409 `LIBRARY_NOT_EMPTY` when the
+  `books.library_id` count for that row is > 0. The defence
+  keeps the `books.library_id` FK (migration 014) from
+  dangling when an admin drops a library that still indexes
+  books.
+- **PUT /:id/active** is open to every paired device and is
+  idempotent. The repository flips every other `device_libraries`
+  row for the same device to `active = FALSE` in the same
+  transaction so at most one row per device is active.
+
+### Module map addition
+
+| Module           | Controller routes                                                  | Service           | Repositories + Adapters                                                                  |
+|------------------|--------------------------------------------------------------------|-------------------|------------------------------------------------------------------------------------------|
+| `LibrariesModule`| `GET/POST /api/libraries`, `GET/PATCH/DELETE /api/libraries/:id`, `PUT /api/libraries/:id/active` | `LibrariesService` | `LIBRARIES_REPOSITORY` (PgLibrariesRepository), `LIBRARY_BOOK_COUNT` (PgLibraryBookCountAdapter over `BOOKS_REPOSITORY.countByLibrary`), `DEVICES_LOOKUP` (PgDeviceLookupAdapter over `DEVICES_REPOSITORY.findByDeviceId`) |
+
+`LibrariesModule` imports `AuthModule` (for `JwtAuthGuard`),
+`DatabaseModule` (for `PG_POOL`), and `BooksModule` (for the
+`BOOKS_REPOSITORY` provider the `countByLibrary` adapter
+needs). The same string-token pattern as `BooksModule` makes
+the controller e2e suite stub all three seams with in-memory
+implementations.
+
+### Schema (PR-N2)
+
+| Migration                    | What it adds                                                                                          |
+|------------------------------|-------------------------------------------------------------------------------------------------------|
+| `012_libraries.sql`          | `libraries` table — `BIGSERIAL id`, `name`, `root_path`, `created_by_device_id UUID NULL`, `created_at`. Index on `created_by_device_id` (partial, `WHERE NOT NULL`). |
+| `013_device_libraries.sql`   | `device_libraries(device_id UUID, library_id BIGINT REFERENCES libraries(id) ON DELETE CASCADE, active BOOLEAN)` with composite PK + partial index on `(device_id, active)`. |
+| `014_books_library_id.sql`   | `ALTER TABLE books ADD COLUMN library_id BIGINT REFERENCES libraries(id)` + B-tree index. Column is NULLABLE so the MVP import path can land books before library resolution is known. |
+
 ## Migrations
 
 Every schema change ships as a numbered SQL file under
@@ -521,7 +642,7 @@ DATABASE_URL=… npm run migrate
 | `/readyz` | `readinessProbe` | Postgres reachable (Redis-down OK) | Postgres down    |
 | `/health` | operator curl    | Postgres + Redis both reachable      | either down      |
 
-Files shipped in PR-2B + PR-2C:
+Files shipped in PR-2B + PR-2C + PR-N2:
 
 | File | What it does |
 |------|--------------|
@@ -536,6 +657,9 @@ Files shipped in PR-2B + PR-2C:
 | `009_seed_categories.sql` | bilingual taxonomy seed (Ciencia, Arte, Literatura, …) |
 | `010_devices.sql` | `devices` table — UUID + SHA-256 token hash + INET ip_address |
 | `011_pgroonga_defrag.sql` | `pgroonga_index_defrag(text)` helper + nightly pg_cron job at 03:00 UTC (4R review #43) |
+| `012_libraries.sql` | `libraries` table — BIGSERIAL id + name + root_path + created_by_device_id (UUID NULL) + created_at |
+| `013_device_libraries.sql` | `device_libraries` join — composite PK + ON DELETE CASCADE + partial index on `(device_id, active)` |
+| `014_books_library_id.sql` | `books.library_id` (nullable FK to libraries) + B-tree index |
 
 ### pgroonga ops runbook (4R review #43)
 
@@ -636,11 +760,12 @@ pgroonga instance.
 | Repository | Methods |
 |------------|---------|
 | `AuthorsRepository` | `insert`, `findById`, `list`, `count` |
-| `BooksRepository` | `insert`, `findById`, `listByAuthor`, `list` (+filters), `count`, `search` |
+| `BooksRepository` | `insert`, `findById`, `listByAuthor`, `list` (+filters incl. `libraryId`), `count`, `search`, `countByLibrary` |
 | `CategoriesRepository` | `insert`, `findByPath`, `listChildren`, `listRoots`, `listForBook`, `findSubtree` (recursive CTE) |
 | `SagasRepository` | `insert`, `attachBook` (idempotent), `listByAuthor`, `listForBook`, `listBooksInSaga` |
 | `DownloadsRepository` | `insert`, `markCompleted`, `updateProgress`, `listByDevice`, `findById`, `findCompletedForDeviceAndBook`, `stats` |
 | `DevicesRepository` | `insert`, `findByDeviceId`, `updateTokenHash`, `touch` |
+| `LibrariesRepository` | `list`, `findById`, `insert`, `update`, `delete`, `setActiveForDevice`, `getActiveForDevice`, `listForDevice` |
 | `SearchRepository` | `search` (pgroonga `&@~` + `pgroonga.score(tableoid)`) |
 
 ## Auth (PR-2C, hardened PR-2F.1)
