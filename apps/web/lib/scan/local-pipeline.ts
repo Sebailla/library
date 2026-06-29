@@ -8,6 +8,7 @@ import {
 } from '@alejandria/sidecar'
 import { extname } from 'node:path'
 
+import { logError } from '@/lib/log'
 import { openLocalDb, type BookInput, type BookRow } from '../db/local-db'
 
 /**
@@ -190,6 +191,7 @@ export async function scanFile(filePath: string, options: ScanOptions = {}): Pro
   try {
     envelope = JSON.parse(result.stdout.trim())
   } catch (err) {
+    logError('scan', err, { stage: 'envelope-parse', filePath })
     throw new Error(
       `sidecar produced invalid JSON: ${err instanceof Error ? err.message : String(err)}`,
     )

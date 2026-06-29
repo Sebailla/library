@@ -18,6 +18,7 @@
 
 import { createNasClient, type INasClient, type NasPairResponse } from '@/lib/api/nas-client'
 import { downloadBook, type DownloadBookResult } from '@/lib/download/download-flow'
+import { logError } from '@/lib/log'
 import { scanFile } from '@/lib/scan/local-pipeline'
 
 /** Discriminated union the page can render without try/catch. */
@@ -63,6 +64,8 @@ export async function pairDevice(
     const response = await client.pair({ pin, deviceName })
     return ok(response)
   } catch (err) {
+    const code = isNasHttpError(err) ? err.code ?? 'NAS_ERROR' : 'UNEXPECTED'
+    logError('nas-actions.pairDevice', err, { pinLength: pin.length, code })
     if (isNasHttpError(err)) {
       return fail(err.code ?? 'NAS_ERROR', err.message)
     }
@@ -86,6 +89,8 @@ export async function refreshToken(
   try {
     return ok(await client.refresh())
   } catch (err) {
+    const code = isNasHttpError(err) ? err.code ?? 'NAS_ERROR' : 'UNEXPECTED'
+    logError('nas-actions.refreshToken', err, { hasToken: token.length > 0, code })
     if (isNasHttpError(err)) {
       return fail(err.code ?? 'NAS_ERROR', err.message)
     }
@@ -132,6 +137,8 @@ export async function downloadFromNas(
     })
     return ok(result)
   } catch (err) {
+    const code = isNasHttpError(err) ? err.code ?? 'NAS_ERROR' : 'UNEXPECTED'
+    logError('nas-actions.downloadFromNas', err, { bookId, code })
     if (isNasHttpError(err)) {
       return fail(err.code ?? 'NAS_ERROR', err.message)
     }
@@ -152,6 +159,7 @@ export async function scanLocalFolder(
     const row = await scanFile(filePath)
     return ok({ id: row.id, title: row.title, filePath: row.filePath })
   } catch (err) {
+    logError('nas-actions.scanLocalFolder', err, { filePath })
     return fail('SCAN_ERROR', err instanceof Error ? err.message : 'Unknown error')
   }
 }

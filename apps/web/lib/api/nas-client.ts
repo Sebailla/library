@@ -19,6 +19,8 @@
  * the resumable transport that wraps this method.
  */
 
+import { logError } from '@/lib/log'
+
 /** A row as the NAS serves it from `GET /api/books` (PR-2D). */
 export interface NasBook {
   id: number
@@ -289,8 +291,11 @@ async function sendJson<T>(state: NasClientState, path: string, options: Request
     let body: unknown = null
     try {
       body = await response.json()
-    } catch {
-      // ignore — non-JSON error body
+    } catch (err) {
+      // Non-JSON error body — surface the parse failure but
+      // continue to throw the HTTP error below (which already
+      // carries the status code).
+      logError('nas-client', err, { stage: 'parse-error-body', status: response.status, path })
     }
     throw describeError(response.status, body)
   }
@@ -351,8 +356,12 @@ async function drainToFile(
         if (unlink) {
           try {
             await unlink(destPath)
-          } catch {
-            /* best-effort cleanup */
+          } catch (err) {
+            // Best-effort cleanup. The next line throws the
+            // overflow error which is what the caller cares
+            // about; the unlink failure is recorded so an
+            // operator can spot stale partial files.
+            logError('nas-client', err, { stage: 'overflow-unlink', destPath })
           }
         }
         throw new DownloadOverflowError(maxBytes, cumulative)
