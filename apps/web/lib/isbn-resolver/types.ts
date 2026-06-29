@@ -66,6 +66,14 @@ export interface BookInput {
   author?: string
   format: 'pdf' | 'epub' | string
   filePath: string
+  /**
+   * Optional pre-extracted text (first ~50k chars). When
+   * present, the regex layer uses it directly; when
+   * absent, the layer must extract from `filePath` on
+   * its own. UI / fixture callers usually set this so
+   * the resolver does not re-open the file twice.
+   */
+  textSnippet?: string
 }
 
 /** Minimal cache seam consumed by every layer. */
