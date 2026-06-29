@@ -321,7 +321,7 @@ describe('GET /api/files/:book_id (full body, no Range)', () => {
       expect(res.headers['content-type']).toMatch(/epub/);
       expect(Number(res.headers['content-length'])).toBe(content.length);
       expect(res.headers['accept-ranges']).toBe('bytes');
-      expect(res.headers['etag']).toMatch(/^[0-9a-f]+-[0-9a-f]+$/);
+      expect(res.headers['etag']).toMatch(/^"[0-9a-f]+-[0-9a-f]+"$/);
       expect(res.body).toBe(content);
     } finally {
       await env.app.close();
@@ -436,7 +436,7 @@ describe('HEAD /api/files/:book_id', () => {
         .expect(200);
       expect(res.headers['accept-ranges']).toBe('bytes');
       expect(Number(res.headers['content-length'])).toBe(content.length);
-      expect(res.headers['etag']).toMatch(/^[0-9a-f]+-[0-9a-f]+$/);
+      expect(res.headers['etag']).toMatch(/^"[0-9a-f]+-[0-9a-f]+"$/);
       // HEAD must not have a body.
       expect(res.body).toEqual({});
     } finally {
