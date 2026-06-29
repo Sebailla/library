@@ -66,6 +66,8 @@ npm run dev    # http://localhost:3001
 | `/` | `app/(catalog)/page.tsx` | RSC. Reads `lib/db/local-db.ts`. Cached for 1h with `cacheTag('local-library')`. Renders a "Pair with NAS" form (PR-3C) so the user can mint a bearer token. |
 | `/browse` | `app/(nas)/browse/page.tsx` | RSC. Reads `lib/api/nas-client.ts` via `GET /api/books`. Cached for 1h with `cacheTag('nas-catalog')`. Renders an empty list when the NAS is offline. |
 | `/reader/[bookId]` | `app/reader/[bookId]/page.tsx` | Client Component. Mounts `<Reader />` with `<ProgressBar />` and a lazy-loaded `<PdfViewer />` (`pdfjs-dist` via `next/dynamic({ ssr:false })`). |
+| `/livez` | `app/livez/route.ts` | Process liveness probe. Always 200 once the Next.js worker is up. Per Kubernetes convention does NOT touch the database. |
+| `/readyz` | `app/readyz/route.ts` | Readiness probe. Runs `PRAGMA quick_check` against the local SQLite. Returns 200 when healthy, 503 with `{checks: {sqlite: '<error>'}}` when the DB is corrupt or unreadable. |
 
 ### NAS client (PR-3C)
 
@@ -253,6 +255,113 @@ into the local SQLite. The spawn step is injected via
   tests. `vitest.config.ts` aliases `@/*` to the project root so
   the tests can import the same paths the source uses.
 - ESLint via `eslint-config-next`.
+
+## Observability (PR-3-fix-C, #61)
+
+The web app ships a tiny structured logger, request-ID
+propagation, and two health endpoints. Together they let a
+debugger trace a single user action from the browser
+through the Server Action, the DB write, and the NAS
+round-trip.
+
+### Structured logger (`lib/log.ts`)
+
+```ts
+import { info, warn, logError } from '@/lib/log'
+
+info('scan', 'file queued', { filePath, sizeBytes })
+warn('nas-client', 'slow response', { latencyMs: 1500 })
+logError('scan', err, { filePath, stage: 'envelope-parse' })
+```
+
+Each call emits a single JSON record to the appropriate
+`console.*` sink (`log` for info, `warn` for warn,
+`error` for error):
+
+```json
+{
+  "timestamp": "2026-06-29T12:34:56.789Z",
+  "level": "error",
+  "scope": "scan",
+  "message": "Unexpected token n in JSON at position 0",
+  "requestId": "a1b2c3d4e5f6g7h8",
+  "context": { "filePath": "/library/rayuela.epub", "stage": "envelope-parse" },
+  "error": { "name": "SyntaxError", "message": "...", "stack": "..." }
+}
+```
+
+In dev / test (`NODE_ENV !== 'production'`) the logger
+emits a human-readable single line instead of JSON. The
+writer is also injectable via `setWriter` so tests can
+capture records without monkey-patching `console`.
+
+### Request-ID propagation (`lib/middleware/request-id.ts` + `proxy.ts`)
+
+Every request runs through the `proxy.ts` root middleware
+(which Next.js 16 renamed from `middleware.ts`). The
+middleware:
+
+1. Reads the incoming `X-Request-Id` header (or generates a
+   fresh 16-hex-char id via `crypto.randomUUID()` when
+   absent).
+2. Calls `lib/log.setRequestId(id)` so every subsequent
+   `info`/`warn`/`logError` call in the request lifetime
+   carries the id.
+3. Sets `X-Request-Id` on the outgoing response so the
+   client can correlate end-to-end.
+4. Calls `lib/log.clearRequestId()` after the response so
+   the id never leaks to a subsequent request on the same
+   worker.
+
+### Catch-block observability
+
+Every catch block in the modules under test calls
+`logError(scope, err, { context })` before re-throwing or
+returning a structured error:
+
+| Module | Scope | Context |
+|--------|-------|---------|
+| `lib/scan/local-pipeline.ts` | `scan` | `{stage, filePath}` |
+| `lib/api/nas-client.ts` | `nas-client` | `{stage, status\|destPath, path}` |
+| `app/_actions/nas-actions.ts` (pair) | `nas-actions.pairDevice` | `{pinLength, code}` |
+| `app/_actions/nas-actions.ts` (refresh) | `nas-actions.refreshToken` | `{hasToken, code}` |
+| `app/_actions/nas-actions.ts` (download) | `nas-actions.downloadFromNas` | `{bookId, code}` |
+| `app/_actions/nas-actions.ts` (scan) | `nas-actions.scanLocalFolder` | `{filePath}` |
+| `app/readyz/route.ts` | `readyz` | `{check, stage?}` |
+
+`lib/download/download-flow.ts`, `BookDownloadForm`, and
+`PairWithNasForm` have no `try/catch` blocks — they
+propagate to the Server Action, which is the single
+boundary where observability is enforced.
+
+### `/livez` (liveness)
+
+```
+GET /livez → 200 {status: 'ok'}
+```
+
+A liveness probe failure means the container orchestrator
+should restart this process. Per Kubernetes / RFC
+conventions this endpoint MUST NOT depend on external
+services (the local SQLite lives at `lib/db/local-db.ts`)
+— a liveness failure must not trigger a restart for a
+transient DB outage.
+
+### `/readyz` (readiness)
+
+```
+GET /readyz → 200 {status: 'ok',    checks: {sqlite: 'ok'}}
+GET /readyz → 503 {status: 'degraded', checks: {sqlite: '<error>'}}
+```
+
+A readiness failure means the load balancer should stop
+sending traffic to this instance; the process itself is
+fine. The handler opens the local SQLite, runs
+`PRAGMA quick_check` (cheap O(pages) variant of
+`integrity_check`), and closes the handle in a `finally`
+so we never leak it. A failure is logged via `logError`
+with `scope='readyz'` so the operator sees the full
+context in the structured log stream.
 
 ## See also
 
