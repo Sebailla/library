@@ -9,6 +9,7 @@ import {
   type NasCompleteDownloadResponse,
 } from '../api/nas-client'
 import { openLocalDb, type BookInput } from '../db/local-db'
+import { withRetry } from './retry'
 
 /**
  * High-level "download a book" orchestration (PR-3C).
@@ -50,6 +51,19 @@ export interface DownloadBookOptions {
   openDb?: typeof openLocalDb
   /** Open the DB but do not close it (defaults to `false`). */
   leaveDbOpen?: boolean
+  /**
+   * Bytes already on disk at `destPath` (used for resume). When
+   * non-zero the flow starts the byte transfer with
+   * `Range: bytes=<start>-` so the NAS only sends the tail.
+   * PR-3-fix-B #62.
+   */
+  start?: number
+  /**
+   * Override the retry helper (used by tests that want fast
+   * retries / no real timers). Defaults to `withRetry` with
+   * `attempts=3, backoff='exp', baseMs=250`.
+   */
+  retry?: <T>(fn: () => Promise<T>) => Promise<T>
 }
 
 export interface DownloadBookResult {
@@ -71,6 +85,13 @@ const defaultWriteFile: (path: string, data: Uint8Array) => Promise<void> = asyn
 /**
  * Download a book from the NAS, persist it locally, and close
  * the tracking row on the NAS.
+ *
+ * PR-3-fix-B #62: each NAS round-trip step is wrapped in
+ * `withRetry` (attempts=3, exp backoff, 250 ms base) so a single
+ * 503 / 504 / network drop doesn't leave a tracking row open on
+ * the NAS. Resume support is wired via the `start` option:
+ * pre-existing bytes on disk are passed to `downloadFile({ start })`
+ * which appends them to the Range request.
  */
 export async function downloadBook(options: DownloadBookOptions): Promise<DownloadBookResult> {
   const {
@@ -81,23 +102,30 @@ export async function downloadBook(options: DownloadBookOptions): Promise<Downlo
     destPath,
     nasClient,
     onProgress,
+    start = 0,
   } = options
   const writeFile = options.writeFile ?? defaultWriteFile
   const openDb = options.openDb ?? openLocalDb
+  // Default retry: 3 attempts with exponential backoff (250 ms,
+  // 500 ms). Tests inject a no-op retry for speed.
+  const retry = options.retry ?? ((fn) => withRetry(fn))
 
-  // 1. Resolve the metadata we will store locally.
-  const book = await nasClient.getBook(bookId)
+  // 1. Resolve the metadata we will store locally. PR-3-fix-B
+  //    #62: each NAS round-trip is wrapped in `withRetry`.
+  const book = await retry(() => nasClient.getBook(bookId))
 
   // 2. Open the NAS tracking row BEFORE we start writing bytes so
   //    the user's "My downloads" panel can render the file as
   //    "in progress" immediately.
-  const trackingStart = await nasClient.startDownload({
-    bookId,
-    deviceId,
-    deviceName,
-    userId,
-    fileSizeBytes: book.file_size_bytes ?? 0,
-  })
+  const trackingStart = await retry(() =>
+    nasClient.startDownload({
+      bookId,
+      deviceId,
+      deviceName,
+      userId,
+      fileSizeBytes: book.file_size_bytes ?? 0,
+    }),
+  )
 
   // 3. Stream the bytes. If anything throws here, the NAS tracking
   //    row stays open — the periodic scan worker reconciles it.
@@ -108,17 +136,29 @@ export async function downloadBook(options: DownloadBookOptions): Promise<Downlo
   //    ACTUAL number of bytes persisted to disk — not the
   //    pre-flight expected size from `book.file_size_bytes`,
   //    which can diverge on partial / failed / resumed transfers.
+  //
+  //    PR-3-fix-B #62: the flow also wires resume support via
+  //    `start`. When `start > 0` the caller asserts those bytes
+  //    are already on disk and `downloadFile` only fetches the
+  //    tail with `Range: bytes=<start>-`.
   await mkdir(dirname(destPath), { recursive: true })
-  let bytesReceived = 0
-  await nasClient.downloadFile(
-    bookId,
-    destPath,
-    (bytes) => {
-      bytesReceived = bytes
-      if (onProgress) onProgress(bytes)
-    },
-    { writeFile },
+  let lastProgressValue = 0
+  await retry(() =>
+    nasClient.downloadFile(
+      bookId,
+      destPath,
+      (bytes) => {
+        lastProgressValue = bytes
+        if (onProgress) onProgress(bytes)
+      },
+      { writeFile, start },
+    ),
   )
+  // The cumulative byte count includes the resume offset (the
+  // caller passed `start = bytes already on disk`). Report that
+  // full count to `completeDownload` so the NAS's "bytes
+  // transferred" ledger stays accurate across resumed transfers.
+  const bytesReceived = start + lastProgressValue
 
   // 4. Insert the local row so the Reader can find the book.
   const db = openDb()
@@ -131,10 +171,12 @@ export async function downloadBook(options: DownloadBookOptions): Promise<Downlo
   //    transfer produced zero bytes (e.g. an empty 200 response
   //    or a write that threw after partial progress), report 0
   //    rather than the pre-flight expected size.
-  const tracking = await nasClient.completeDownload(trackingStart.download_id, {
-    completed: true,
-    bytesTransferred: bytesReceived,
-  })
+  const tracking = await retry(() =>
+    nasClient.completeDownload(trackingStart.download_id, {
+      completed: true,
+      bytesTransferred: bytesReceived,
+    }),
+  )
 
   return {
     book,
