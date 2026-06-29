@@ -29,6 +29,8 @@ biblioteca-v2/
 | PR-3A | Scaffold Next.js 16 + catálogo RSC browse (`apps/web/`) | Merged |
 | PR-3B | SQLite local real + FTS5 + pipeline de escaneo + lector PDF (`apps/web/`) | Merged |
 | PR-3C | Cliente NAS + descarga con Range + server actions + pdfjs (`apps/web/`) | **Este PR** |
+| PR-4A | Pipeline de resolución de ISBN de 7 capas (`apps/web/lib/isbn-resolver/`) | Merged |
+| PR-4B | Capa de sync de actividad en iCloud Drive (`apps/web/lib/sync/`) | **Este PR** |
 | PR4 | Shell de Electron + iCloud Drive + ISBN pipeline de 7 capas | Pendiente |
 
 ## Ejecutar `apps/web/` (PR-3C)
@@ -262,6 +264,67 @@ unit-testeable sin Python.
   del proyecto para que los tests puedan importar los mismos paths
   que la fuente.
 - ESLint vía `eslint-config-next`.
+
+## Sync de actividad en iCloud Drive (PR-4B, issue #73)
+
+`apps/web/lib/sync/` entrega la capa de sync de
+actividad en iCloud Drive que refleja notas, highlights,
+bookmarks y progreso de lectura a través de todos los
+dispositivos del usuario — sin que nosotros corramos un
+servidor. El layout es exactamente el que usa Apple
+Books: archivos JSON por actividad bajo un único
+directorio que iCloud propaga automáticamente.
+
+```
+~/Library/Mobile Documents/com~apple~cloudDocs/Alejandria/
+├── notes/<bookId>.json
+├── highlights/<bookId>.json
+├── bookmarks/<bookId>.json
+└── progress/<bookId>.json
+```
+
+Cada archivo es un sobre auto-descriptivo
+(`version: 1`, `bookId`, `category`, `updatedAt`, más el
+payload). Dos escrituras compitiendo entre dispositivos
+se resuelven con last-write-wins sobre `updatedAt`, con
+el mtime del SO como desempate — coincidiendo con la
+política de Apple Books en lugar de inventar una propia.
+
+### Layout del módulo
+
+| Archivo | Responsabilidad |
+|---------|-----------------|
+| `lib/sync/types.ts` | `Note`, `Highlight`, `Bookmark`, `ReadingProgress`, `SyncFile`, `WatcherEvent`, `Watcher`, `SyncFs` |
+| `lib/sync/path.ts` | `getICloudDir()` (sensible a env), `getSyncFilePath()` |
+| `lib/sync/writer.ts` | `writeSyncFile()` — JSON con sello de `version: 1` + `updatedAt` |
+| `lib/sync/conflict-resolver.ts` | `resolveSyncConflict()` — LWW con mtime como desempate |
+| `lib/sync/watcher.ts` | `createWatcher()` — wrapper de chokidar, emite `WatcherEvent`s |
+| `lib/sync/sync-engine.ts` | `createSyncEngine()` — orquesta pull / push / merge |
+| `lib/sync/engine-factory.ts` | `createDefaultEngine()` — wirea `node:fs` real + chokidar |
+| `lib/sync/index.ts` | Superficie pública |
+
+### Wireado (producción)
+
+```ts
+import { createDefaultEngine } from '@/lib/sync'
+
+const engine = createDefaultEngine() // respeta $ALEJANDRIA_ICLOUD_DIR
+await engine.start()                  // pull-on-startup
+await engine.push({                   // push-on-write
+  category: 'notes',
+  bookId: bookId,
+  data: note,
+})
+engine.onChange((sf) => {
+  // refrescar UI del reader, etc.
+})
+```
+
+### Variables de entorno
+
+| Var | Consumida por | Comportamiento |
+|-----|---------------|----------------|
+| `ALEJANDRIA_ICLOUD_DIR` | `getICloudDir()` | Path absoluto o relativo; cuando está seteada, reemplaza el default macOS. Permite a máquinas de desarrollo no-macOS y a CI ejercitar la capa de sync contra un dir tmp. |
 
 ## Observabilidad (PR-3-fix-C, #61)
 

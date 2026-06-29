@@ -1,0 +1,21 @@
+# dependencies
+node_modules/
+
+# build artefacts
+dist/
+out/
+build/
+release/
+
+# electron-forge caches
+.cache/
+out/make/
+
+# typescript
+*.tsbuildinfo
+
+# misc
+.DS_Store
+*.log
+.env
+.env.local
