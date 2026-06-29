@@ -42,6 +42,19 @@ vi.mock('@/components/Reader', () => ({
   Reader: (props: Record<string, unknown>) => ReaderMock(props),
 }))
 
+// `next/cache` exports `cacheLife` + `cacheTag` which require the
+// Next.js `cacheComponents` runtime config (only available inside
+// the Next.js dev server). In a vitest/jsdom env they throw, so
+// we stub them as no-ops — the `'use cache'` directive at the
+// top of `loadReader` is parsed at module-load time and ignored
+// when no Next.js runtime is present.
+vi.mock('next/cache', () => ({
+  cacheLife: () => undefined,
+  cacheTag: () => undefined,
+  revalidateTag: () => undefined,
+  revalidatePath: () => undefined,
+}))
+
 const { openLocalDb } = await import('@/lib/db/local-db')
 const { loadReader } = await import('../[bookId]/page')
 

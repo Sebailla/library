@@ -29,7 +29,17 @@ import { Reader } from '@/components/Reader'
 
 type RouteParams = { bookId: string }
 
-async function loadReader(bookId: string): Promise<React.JSX.Element> {
+/**
+ * Load the book for the reader route. Exported (not just used
+ * internally) so the integration test in `__tests__/page.test.tsx`
+ * can call it directly and assert on the JSX the route produces.
+ *
+ * The function stays async + `'use cache'` per the
+ * `nextjs-app-shell` spec — that cache directive applies at
+ * module load time, not at runtime, so test invocations just
+ * run the body.
+ */
+export async function loadReader(bookId: string): Promise<React.JSX.Element> {
   'use cache'
   cacheLife('hours')
   cacheTag(`book:${bookId}`)
@@ -66,7 +76,19 @@ async function loadReader(bookId: string): Promise<React.JSX.Element> {
     )
   }
 
-  return <Reader book={book} currentPage={currentPage} totalPages={totalPages} />
+  // Per #59: the Reader's PdfSurface branch is gated on a
+  // non-empty `filePath` prop (Reader.tsx:88). If we don't pass
+  // it here the reader renders the "Loading reader…" placeholder
+  // forever — the PDF never mounts. Thread the absolute path
+  // straight from the local SQLite row.
+  return (
+    <Reader
+      book={book}
+      currentPage={currentPage}
+      totalPages={totalPages}
+      filePath={book.filePath}
+    />
+  )
 }
 
 async function ReaderView({
