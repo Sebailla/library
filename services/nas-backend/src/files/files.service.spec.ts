@@ -1,4 +1,4 @@
-import { parseRangeHeader } from './files.service';
+import { FilesService, parseRangeHeader } from './files.service';
 
 /**
  * Contract tests for {@link parseRangeHeader}.
@@ -60,5 +60,79 @@ describe('parseRangeHeader', () => {
 
   it('returns null for non-numeric ranges', () => {
     expect(parseRangeHeader('bytes=abc-def', 4096)).toBeNull();
+  });
+});
+
+/**
+ * Contract tests for {@link FilesService.resolveBookFilePath}.
+ *
+ * The repository contract is exercised through an in-memory stub
+ * (matching the rest of the project's e2e tests) so the path-
+ * resolution logic is the only thing under test.
+ *
+ * Scope:
+ *   - book missing            → NotFoundException(FILE_NOT_FOUND)
+ *   - stored path inside root → absolute resolved path under root
+ *   - ``..`` traversal        → NotFoundException(FILE_NOT_FOUND)
+ *   - absolute stored path outside root → NotFoundException(FILE_NOT_FOUND)
+ */
+describe('resolveBookFilePath', () => {
+  function makeBooks(rows: Array<{ id: number; filePath: string }>) {
+    return {
+      findById: async (id: number) => {
+        const row = rows.find((r) => r.id === id);
+        return row ?? null;
+      },
+      // Unused by these tests but required to satisfy the type.
+      insert: async () => {
+        throw new Error('not used');
+      },
+      list: async () => [],
+      count: async () => 0,
+      search: async () => [],
+      close: async () => undefined,
+    };
+  }
+
+  it('resolves a relative stored path against the library root', async () => {
+    const books = makeBooks([
+      { id: 1, filePath: 'authors/asimov/foundation.epub' },
+    ]);
+    const svc = new FilesService(books as never, '/srv/library');
+    const resolved = await svc.resolveBookFilePath(1);
+    // Normalised, separator-stable representation. We assert on
+    // the suffix rather than the exact string so the test is
+    // portable across POSIX (CI) and Windows-style paths.
+    expect(resolved.replace(/\\/g, '/')).toBe(
+      '/srv/library/authors/asimov/foundation.epub',
+    );
+  });
+
+  it('throws FILE_NOT_FOUND when the book does not exist', async () => {
+    const books = makeBooks([]);
+    const svc = new FilesService(books as never, '/srv/library');
+    await expect(svc.resolveBookFilePath(99)).rejects.toMatchObject({
+      response: { error: { code: 'FILE_NOT_FOUND' } },
+    });
+  });
+
+  it('refuses stored paths that escape the library root via ..', async () => {
+    const books = makeBooks([
+      { id: 1, filePath: '../etc/passwd' },
+    ]);
+    const svc = new FilesService(books as never, '/srv/library');
+    await expect(svc.resolveBookFilePath(1)).rejects.toMatchObject({
+      response: { error: { code: 'FILE_NOT_FOUND' } },
+    });
+  });
+
+  it('refuses stored absolute paths outside the library root', async () => {
+    const books = makeBooks([
+      { id: 1, filePath: '/etc/passwd' },
+    ]);
+    const svc = new FilesService(books as never, '/srv/library');
+    await expect(svc.resolveBookFilePath(1)).rejects.toMatchObject({
+      response: { error: { code: 'FILE_NOT_FOUND' } },
+    });
   });
 });
