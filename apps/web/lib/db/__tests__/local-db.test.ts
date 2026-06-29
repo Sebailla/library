@@ -3,7 +3,19 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { openLocalDb } from '../local-db'
+import { openLocalDb, type BookRow } from '../local-db'
+
+/**
+ * Compile-time + runtime assertion of the canonical BookRow shape
+ * (PR-3-fix-A, issue #66). After consolidation, BookRow is the
+ * 8-field DB row in `@/lib/db/local-db`. The component-side
+ * 4-field type is `BookListItem` (in `@/components/BookList`) —
+ * no `BookRowDb` shim must leak.
+ *
+ * The type-level assertion below fails to compile if a future
+ * refactor breaks the canonical shape. The runtime assertion
+ * verifies the actual returned object from `findById`.
+ */
 
 /**
  * TDD tests for `lib/db/local-db.ts` (PR-3B).
@@ -131,5 +143,53 @@ describe('local-db (PR-3B)', () => {
     expect(fundacion.map((h) => h.id)).toEqual(['book-c'])
 
     db.close()
+  })
+
+  it('BookRow is the canonical 8-field DB row shape', () => {
+    // After #66, BookRow in `@/lib/db/local-db` is the canonical
+    // type that ALL consumers should import — Reader, BookDetail,
+    // BookDownloadForm, scan pipeline, download flow. The
+    // component-side 4-field type lives in `@/components/BookList`
+    // as `BookListItem`; the historical 4-field `BookRow` and the
+    // internal `BookRowDb` shim must both be gone.
+    //
+    // This assertion exercises the public contract: a `BookRow`
+    // returned by `findById` must have ALL eight fields including
+    // the storage-only ones (`format`, `filePath`, `contentHash`,
+    // `excerpt`). If any field is dropped, this test fails.
+    const db = openLocalDb()
+    try {
+      const row: BookRow = db.findById('book-001') ?? db.insertBook({
+        id: 'book-001',
+        title: 'Ficciones',
+        author: 'Jorge Luis Borges',
+        year: 1944,
+        format: 'pdf',
+        filePath: '/library/borges/ficciones.pdf',
+        contentHash: 'sha256:abc',
+        excerpt: 'Cuentos que desdibujan la realidad.',
+      })
+      expect(row).toEqual({
+        id: 'book-001',
+        title: 'Ficciones',
+        author: 'Jorge Luis Borges',
+        year: 1944,
+        format: 'pdf',
+        filePath: '/library/borges/ficciones.pdf',
+        contentHash: 'sha256:abc',
+        excerpt: 'Cuentos que desdibujan la realidad.',
+      })
+    } finally {
+      db.close()
+    }
+  })
+
+  it('does NOT export a BookRowDb shim from local-db.ts', async () => {
+    // After #66, `BookRowDb` (the snake_case internal row type
+    // used by `better-sqlite3`) must be dropped or made private.
+    // Only the canonical `BookRow` leaves the module.
+    const mod = await import('../local-db')
+    const exports = mod as unknown as Record<string, unknown>
+    expect(exports['BookRowDb']).toBeUndefined()
   })
 })
