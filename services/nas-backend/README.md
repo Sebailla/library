@@ -26,6 +26,8 @@ NestJS application that backs the **alejandria-v2** NAS catalog.
 > - **PR-2D** — `BooksModule`, `SearchModule`
 > - **PR-2E** — `DownloadsModule`, `WorkersModule` (BullMQ)
 > - **PR-2F** — `DiscoveryModule` (mDNS + Tailscale)
+> - **PR-N1** — `FilesModule` (`GET /api/files/:id` with HTTP Range,
+>   `HEAD /api/files/:id` for resumable downloads)
 
 ## Stack
 
@@ -44,7 +46,7 @@ NestJS application that backs the **alejandria-v2** NAS catalog.
 services/nas-backend/
 ├── src/
 │   ├── main.ts                # NestJS bootstrap
-│   ├── app.module.ts          # root module (Database + Health + Auth + Me)
+│   ├── app.module.ts          # root module (Database + Health + Auth + Me + Books + Files + ...)
 │   ├── database/              # PR-2B — Postgres pool + DatabaseModule
 │   ├── repositories/          # PR-2B — books, categories, sagas, downloads
 │   ├── auth/                  # PR-2C — AuthModule, JWT, devices repo
@@ -57,6 +59,12 @@ services/nas-backend/
 │   ├── me/                    # PR-2C — sample protected route
 │   │   ├── me.module.ts
 │   │   └── me.controller.ts   # GET /api/me
+│   ├── files/                 # PR-N1 — Range-aware file streaming
+│   │   ├── files.module.ts    # wires FilesService + LIBRARY_ROOT token
+│   │   ├── files.controller.ts # GET/HEAD /api/files/:book_id
+│   │   ├── files.service.ts   # parseRangeHeader, resolveBookFilePath,
+│   │   │                       # streamFile
+│   │   └── files.types.ts     # RangeSpec, RangeParseError, FORMAT_TO_MIME
 │   └── health/
 │       ├── health.controller.ts
 │       ├── health.module.ts
@@ -69,6 +77,7 @@ services/nas-backend/
 │   ├── health.e2e-spec.ts     # supertest contract tests
 │   ├── auth.e2e-spec.ts       # PR-2C — pair + refresh contract
 │   ├── me.e2e-spec.ts         # PR-2C — protected route contract
+│   ├── files.e2e-spec.ts      # PR-N1 — GET/HEAD /api/files Range contract
 │   ├── migrations.runner.e2e-spec.ts   # runner + idempotency
 │   └── repositories/          # per-repository e2e contract tests
 ├── Dockerfile                 # multi-stage build
@@ -225,10 +234,12 @@ openssl rand -base64 16   # → NAS_PAIR_PIN  (>= 8 chars)
 
 ## What's NOT here yet
 
-PR-2D + PR-2E + PR-2F ship the catalog HTTP slice, the downloads
-tracking endpoints, the BullMQ workers that consume the Python
-sidecar, and the mDNS + Tailscale discovery module. See
-`openspec/changes/alejandria-v2/tasks.md` Phase 2 for the full list.
+PR-2D + PR-2E + PR-2F + PR-N1 ship the catalog HTTP slice, the
+downloads tracking endpoints, the BullMQ workers that consume
+the Python sidecar, the mDNS + Tailscale discovery module, and
+the Range-aware files streaming endpoint. See
+`openspec/changes/alejandria-v2/tasks.md` Phase 2 for the full
+list.
 
 ## Downloads + Workers (PR-2E)
 
@@ -410,6 +421,71 @@ All tokens are namespaced `NAS_*` so they cannot collide with
 anything the other modules inject. The same string-token pattern
 is used by `HealthModule` (`DATABASE_PING`, `REDIS_PING`) and
 `WorkersModule` (`BULLMQ_CONNECTION`).
+
+## Files (PR-N1)
+
+PR-N1 closes the NAS backend by exposing the book files behind a
+Range-aware HTTP endpoint so the desktop / mobile / web clients
+can resume partial downloads without re-fetching the entire
+archive.
+
+```
+GET  /api/files/:book_id   (Bearer required, Range optional)
+  Headers: Authorization: Bearer <jwt>
+           Range: bytes=0-1023  (optional — resumable downloads)
+           If-None-Match: "<etag>"   (optional — 304 short-circuit)
+  → 200 { body }                       full file
+  → 206 { body }                       partial content (Range)
+  → 304                                 not modified
+  → 404 { error: { code: 'FILE_NOT_FOUND' } }
+  → 416 { error: ..., Content-Range: bytes */<size> }
+  → 500 { error: { code: 'FILE_READ_ERROR' } }
+
+HEAD /api/files/:book_id   (Bearer required)
+  Headers: Authorization: Bearer <jwt>
+  → 200 (Content-Length, Content-Type, Accept-Ranges: bytes, ETag)
+```
+
+Every response carries `Accept-Ranges: bytes`, `ETag: "<hex-size>-<hex-mtime>"`,
+and `Last-Modified` so the client can resume, re-validate, or
+preload metadata in parallel with the download itself.
+
+### Path safety (4R review principle)
+
+`FilesService.resolveBookFilePath` rejects any stored path that
+escapes the configured library root (`NAS_LIBRARY_ROOT`, default
+`/share/biblioteca/raw/`) — including `..` traversal attempts and
+absolute paths that resolve outside the root. The check uses
+`path.resolve` so the prefix comparison is reliable across POSIX
+and Windows-style separators, and the failure surfaces as
+`404 FILE_NOT_FOUND` (intentionally vague so the configured root
+is not leaked).
+
+### Range parsing
+
+`FilesService.parseRangeHeader` accepts the byte-range subset of
+RFC 9110 §14.1.2:
+
+| Form                | Meaning                  |
+|---------------------|--------------------------|
+| `bytes=N-M`         | closed range             |
+| `bytes=N-`          | from N to EOF            |
+| `bytes=-N`          | last N bytes             |
+| multi-range         | NOT supported — 200 full |
+| syntactically broken | NOT a Range — 200 full   |
+| start ≥ fileSize    | 416 with `bytes */<size>`|
+
+### Module map addition
+
+| Module       | Controller routes                                       | Services        | Tokens                  |
+|--------------|---------------------------------------------------------|-----------------|-------------------------|
+| `FilesModule` | `GET /api/files/:book_id`, `HEAD /api/files/:book_id`   | `FilesService`  | `LIBRARY_ROOT`          |
+
+`FilesModule` imports `AuthModule` (for `JwtAuthGuard`) and
+`BooksModule` (for the re-exported `BOOKS_REPOSITORY` string
+token). The module is read-only against the books table — it
+looks up `books.file_path` and streams from disk; it never
+mutates a book row.
 
 ## Migrations
 

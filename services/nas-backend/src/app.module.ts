@@ -11,6 +11,7 @@ import { SearchModule } from './search/search.module';
 import { DownloadsModule } from './downloads/downloads.module';
 import { WorkersModule } from './workers/workers.module';
 import { DiscoveryModule } from './discovery/discovery.module';
+import { FilesModule } from './files/files.module';
 
 /**
  * Reshape {@link ThrottlerException} into the project's standard
@@ -59,6 +60,13 @@ class ThrottlerExceptionFilter implements ExceptionFilter {
  * bearer token; it returns the mDNS service name, HTTP port,
  * Tailscale IPv4 (or ``null``), and the host's LAN IPv4 list.
  *
+ * PR-N1 adds the ``FilesModule`` which exposes the
+ * ``GET /api/files/:book_id`` and ``HEAD /api/files/:book_id``
+ * endpoints used to stream book files with HTTP Range support.
+ * The module is read-only against the books table and reuses
+ * ``BOOKS_REPOSITORY`` so the path validation can look up
+ * ``books.file_path`` without a second DB connection.
+ *
  * Rate limiting (#34, 4R review): ``ThrottlerModule`` is
  * registered with three named buckets (see ``throttlers`` array
  * below) and the ``ThrottlerGuard`` is bound as a global APP_GUARD
@@ -92,6 +100,7 @@ class ThrottlerExceptionFilter implements ExceptionFilter {
     DownloadsModule,
     WorkersModule,
     DiscoveryModule,
+    FilesModule,
   ],
   providers: [
     {
