@@ -16,7 +16,8 @@ biblioteca-v2/
 │   ├── web/             PR3 — Next.js 16 + React 19 App Router
 │   └── mac/             PR4 — Electron shell wrapping apps/web
 └── packages/
-    └── core/types/      Shared TS types mirroring alejandria/core/models.py
+    ├── core/types/      Shared TS types mirroring alejandria/core/models.py
+    └── sidecar/         Shared sidecar spawn + path sanitization (PR-3-fix-B)
 ```
 
 ## PR status
@@ -172,13 +173,43 @@ an FTS5 virtual table (`books_fts`) synced by triggers over
 
 | Helper | What it does |
 |--------|--------------|
-| `openLocalDb()` | Opens (or creates) the DB and returns the helper object. |
+| `openLocalDb()` | Opens (or creates) the DB and returns the helper object. Runs `PRAGMA integrity_check` on the first open in the process; subsequent opens skip the check (it's O(file-size)). |
 | `db.insertBook(input)` | Insert one book. Throws on duplicate `id` / `content_hash`. |
 | `db.findById(id)` | Fetch one book by id, or `null` if missing. |
 | `db.listBooks()` | List all books in newest-first `rowid` order. |
 | `db.searchBooks(query)` | FTS5 prefix-match search over `title` + `excerpt`. |
 | `db.insertProgress(bookId, page, pct)` | Upsert reading progress. |
 | `db.getProgress(bookId)` | Fetch reading progress, or `null` if missing. |
+
+#### `library.sqlite` corruption recovery
+
+If `openLocalDb` throws with a message like `integrity_check
+failed for …/library.sqlite`, the file is corrupted. To recover:
+
+1. Close any process holding the SQLite write lock (the web app,
+   any open `<alejandria>` terminal, Electron's main process).
+2. **Back up the corrupted file** (move it to a sibling path so
+   you can inspect it later if needed):
+   ```bash
+   mv apps/web/data/library.sqlite apps/web/data/library.sqlite.corrupt
+   ```
+3. Delete the leftover WAL/SHM files so SQLite doesn't try to
+   replay the corrupted journal:
+   ```bash
+   rm -f apps/web/data/library.sqlite-wal apps/web/data/library.sqlite-shm
+   ```
+4. Trigger a fresh scan — either via the `scanLocalFolder`
+   Server Action on `/` or by re-running the PR1 sidecar CLI:
+   ```bash
+   python -m alejandria_sidecar extract /path/to/library
+   ```
+   The new `library.sqlite` is created with the full schema on
+   first `openLocalDb`. Any book you re-add gets a fresh
+   `content_hash` (the NAS side keeps the originals).
+
+If the corruption recurs on every fresh open, the underlying
+disk is likely failing — back up `data/library.sqlite` and the
+NAS's `books` table, then replace the storage.
 
 ### Scan pipeline
 

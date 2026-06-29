@@ -5,10 +5,15 @@ All notable changes to **alejandria-v2** are documented here. The format follows
 ## [Unreleased]
 
 ### Fixed
-- **web (PR-3-fix-A)**: reader route at `/reader/[bookId]` now mounts the real PDF. The page previously called `<Reader book={...} />` without forwarding `book.filePath`, so the `<Reader />` Client Component's `filePath`-gated `PdfSurface` branch was dead code in production (issue #59, BLOCKER).
-- **web (PR-3-fix-A)**: `download-flow` reports the actual bytes received from the `nas-client.downloadFile` `onProgress` callback as `bytesTransferred` to the NAS — not the pre-flight `book.file_size_bytes` expected size, which diverges on partial / resumed / failed transfers (issue #65, CRITICAL).
+- **monorepo + web + nas-backend (PR-3-fix-B)**: extracted the PR-2E sidecar hardening into a shared `@alejandria/sidecar` workspace package (`sanitizePath`, `spawnSidecar`, `SPAWN_TIMEOUT_MS = 60s`, `MAX_OUTPUT_BYTES = 64 MiB`). Both `apps/web/lib/scan/local-pipeline.ts` and `services/nas-backend/src/workers/scan.processor.ts` now consume the exact same helpers, so the web side no longer reopens argv injection / unbounded stdout / hung-Python interpreter failure modes (issue #60, BLOCKER).
+- **web (PR-3-fix-B)**: `download-flow` wraps each NAS round-trip step (`getBook`, `startDownload`, `downloadFile`, `completeDownload`) in a new `withRetry({ attempts: 3, backoff: 'exp', baseMs: 250 })` helper, so a single 503/504/network drop no longer leaves a tracking row open on the NAS. Also wires resume support via `downloadBook({ start: bytesAlreadyOnDisk })` (issue #62, CRITICAL).
+- **web (PR-3-fix-B)**: `nas-client.downloadFile` now streams chunks directly to disk (one `writeFile` call per network chunk) and enforces `MAX_DOWNLOAD_BYTES = 1 GiB`. On overflow the helper rejects with `DownloadOverflowError(code='DOWNLOAD_OVERFLOW')` and deletes the partial destination file so a failed retry doesn't leave stale bytes (issue #63, CRITICAL).
+- **web (PR-3-fix-B)**: catalog `loadCatalog` and reader `loadReader` wrap their SQLite reads in try/catch — a SQLite lock contention or corruption 500s the routes no longer. The catalog renders the empty-state CTA; the reader renders a friendly fallback pointing at the recovery procedure (issue #64, CRITICAL).
+- **web (PR-3-fix-B)**: `openLocalDb` runs `PRAGMA integrity_check` on the first open in a given process. A corrupted `library.sqlite` now throws a clear error early instead of failing every read downstream. The check is keyed by absolute path so a test suite that swaps `ALEJANDRIA_DATA_DIR` each test still sees a fresh check (issue #64, CRITICAL).
 
 ### Changed
+- **web (PR-3-fix-A)**: reader route at `/reader/[bookId]` now mounts the real PDF. The page previously called `<Reader book={...} />` without forwarding `book.filePath`, so the `<Reader />` Client Component's `filePath`-gated `PdfSurface` branch was dead code in production (issue #59, BLOCKER).
+- **web (PR-3-fix-A)**: `download-flow` reports the actual bytes received from the `nas-client.downloadFile` `onProgress` callback as `bytesTransferred` to the NAS — not the pre-flight `book.file_size_bytes` expected size, which diverges on partial / resumed / failed transfers (issue #65, CRITICAL).
 - **web (PR-3-fix-A)**: consolidated two conflicting `BookRow` types. The canonical 8-field DB row lives in `@/lib/db/local-db`; the component-side 4-field type is now `BookListItem` in `@/components/BookList`. The internal `BookRowDb` shim has been dropped (issue #66, BLOCKER).
 
 ### Planned
