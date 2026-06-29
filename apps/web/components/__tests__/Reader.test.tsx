@@ -78,4 +78,28 @@ describe('Reader', () => {
     // page.
     expect(screen.getByTestId('reader-pdf-surface')).toBeInTheDocument()
   })
+
+  it('accepts an explicit filePath prop without crashing (issue #59 regression)', () => {
+    // After #59, the /reader/[bookId] route threads book.filePath
+    // into the Reader. The Reader's PdfSurface branch is gated on
+    // `isClient && filePath` (Reader.tsx:88); under jsdom isClient
+    // is false so the surface stays in placeholder mode, but the
+    // component must NOT throw on the filePath prop. This is the
+    // unit-level regression test that complements the integration
+    // test in app/reader/__tests__/page.test.tsx.
+    expect(() =>
+      render(
+        <Reader
+          book={sampleBook}
+          currentPage={1}
+          totalPages={1}
+          filePath={sampleBook.filePath}
+        />,
+      ),
+    ).not.toThrow()
+    // The header + placeholder must still render — gating on
+    // filePath must not swallow the rest of the layout.
+    expect(screen.getByRole('heading', { name: /ficciones/i })).toBeInTheDocument()
+    expect(screen.getByTestId('reader-pdf-surface')).toBeInTheDocument()
+  })
 })
