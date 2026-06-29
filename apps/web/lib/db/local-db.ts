@@ -1,0 +1,360 @@
+import Database from 'better-sqlite3'
+import { mkdirSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+
+/**
+ * Process-wide flag: did we already run `PRAGMA integrity_check`
+ * for this DB file? PR-3-fix-B #64 (CRITICAL) runs the check on
+ * the FIRST open so a corrupted `library.sqlite` surfaces a
+ * clear error early. Subsequent opens in the same process skip
+ * the check — it's O(file-size) and would degrade every read.
+ *
+ * The flag is keyed by absolute path so two DBs in the same
+ * process (e.g. a test suite that swaps `ALEJANDRIA_DATA_DIR`)
+ * each get their own first-open check.
+ */
+const integrityChecked = new Set<string>()
+
+/**
+ * Local SQLite mirror of the user's library (per `local-library-db` spec).
+ *
+ * Single-file DB at `<ALEJANDRIA_DATA_DIR>/library.sqlite` (default
+ * `<cwd>/apps/web/data/library.sqlite`). Holds `books`, `authors`,
+ * `categories`, `book_categories`, `sagas`, `book_sagas`, `reading_progress`,
+ * and an FTS5 virtual table over `books.title` + `books.excerpt`.
+ *
+ * The DB is opened lazily so importing this module from a Server
+ * Component during a build stays safe. Schema is created idempotently
+ * on first open.
+ *
+ * NOTE on `books.source`: PR-3B only writes rows with `source =
+ * 'local_scan'`. PR-3C (NAS browse-and-download) will add
+ * `nas_download` rows via `upsertBook()`.
+ */
+
+export interface BookInput {
+  id: string
+  title: string
+  author: string
+  year: number
+  format: string
+  filePath: string
+  contentHash: string
+  excerpt: string
+}
+
+export interface BookRow {
+  id: string
+  title: string
+  author: string
+  year: number
+  format: string
+  filePath: string
+  contentHash: string
+  excerpt: string
+}
+
+export interface LocalDb {
+  insertBook(input: BookInput): BookRow
+  findById(id: string): BookRow | null
+  listBooks(): readonly BookRow[]
+  searchBooks(query: string): readonly BookRow[]
+  insertProgress(bookId: string, currentPage: number, percentage: number): void
+  getProgress(bookId: string): { currentPage: number; percentage: number } | null
+  /**
+   * Run a `PRAGMA` query against the underlying connection.
+   * Exposed so health probes (`/readyz`) can run
+   * `PRAGMA quick_check` without re-opening the DB.
+   */
+  pragma(key: string): unknown
+  close(): void
+}
+
+/**
+ * Resolve the absolute path to the single local DB file.
+ *
+ * Per the issue acceptance criteria, the file lives at
+ * `<ALEJANDRIA_DATA_DIR>/library.sqlite`. PR-3B tests override the
+ * env var with a tmpdir; production runs on Mac will resolve it via
+ * the Electron `app.getPath('userData')` helper in PR4.
+ */
+export function resolveDbPath(): string {
+  const fromEnv = process.env['ALEJANDRIA_DATA_DIR']
+  const base = fromEnv ?? join(process.cwd(), 'data')
+  return join(base, 'library.sqlite')
+}
+
+/**
+ * Schema SQL — idempotent. `CREATE TABLE IF NOT EXISTS` plus an
+ * FTS5 virtual table kept in sync via AFTER INSERT/UPDATE/DELETE
+ * triggers. FTS5 columns match the spec: `title` + `author_name` +
+ * `excerpt`. The spec also lists `category_path` but that joins via
+ * `book_categories` → `categories`; for PR-3B a denormalised author
+ * column on the books row is enough (the full category graph lands
+ * with the taxonomy PR).
+ */
+const SCHEMA_SQL = `
+CREATE TABLE IF NOT EXISTS authors (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE
+);
+
+CREATE TABLE IF NOT EXISTS categories (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  name_es TEXT,
+  parent_id TEXT REFERENCES categories(id)
+);
+
+CREATE TABLE IF NOT EXISTS sagas (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE
+);
+
+CREATE TABLE IF NOT EXISTS books (
+  id TEXT PRIMARY KEY,
+  title TEXT NOT NULL,
+  author TEXT NOT NULL,
+  year INTEGER NOT NULL,
+  format TEXT NOT NULL,
+  file_path TEXT NOT NULL,
+  content_hash TEXT NOT NULL UNIQUE,
+  excerpt TEXT NOT NULL DEFAULT '',
+  source TEXT NOT NULL DEFAULT 'local_scan'
+);
+
+CREATE TABLE IF NOT EXISTS book_categories (
+  book_id TEXT NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+  category_id TEXT NOT NULL REFERENCES categories(id) ON DELETE CASCADE,
+  PRIMARY KEY (book_id, category_id)
+);
+
+CREATE TABLE IF NOT EXISTS book_sagas (
+  book_id TEXT NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+  saga_id TEXT NOT NULL REFERENCES sagas(id) ON DELETE CASCADE,
+  ordinal INTEGER,
+  PRIMARY KEY (book_id, saga_id)
+);
+
+CREATE TABLE IF NOT EXISTS reading_progress (
+  book_id TEXT PRIMARY KEY REFERENCES books(id) ON DELETE CASCADE,
+  current_page INTEGER NOT NULL,
+  percentage REAL NOT NULL,
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS books_fts USING fts5(
+  title,
+  excerpt,
+  content='books',
+  content_rowid='rowid',
+  tokenize='unicode61'
+);
+
+CREATE TRIGGER IF NOT EXISTS books_ai AFTER INSERT ON books BEGIN
+  INSERT INTO books_fts(rowid, title, excerpt)
+  VALUES (new.rowid, new.title, new.excerpt);
+END;
+
+CREATE TRIGGER IF NOT EXISTS books_ad AFTER DELETE ON books BEGIN
+  INSERT INTO books_fts(books_fts, rowid, title, excerpt)
+  VALUES ('delete', old.rowid, old.title, old.excerpt);
+END;
+
+CREATE TRIGGER IF NOT EXISTS books_au AFTER UPDATE ON books BEGIN
+  INSERT INTO books_fts(books_fts, rowid, title, excerpt)
+  VALUES ('delete', old.rowid, old.title, old.excerpt);
+  INSERT INTO books_fts(rowid, title, excerpt)
+  VALUES (new.rowid, new.title, new.excerpt);
+END;
+`
+
+// After #66: `BookRowDb` (the snake_case internal row used by
+// `better-sqlite3`) has been dropped. Its 8-field shape is now
+// inlined into `rowToBook`'s parameter type, and the only
+// `BookRow` that crosses the module boundary is the canonical
+// camelCase shape declared above. A local `type` alias keeps the
+// `better-sqlite3` cast sites readable without re-introducing a
+// named interface that could leak from the module.
+type SnakeRow = {
+  id: string
+  title: string
+  author: string
+  year: number
+  format: string
+  file_path: string
+  content_hash: string
+  excerpt: string
+}
+
+/**
+ * True when a `PRAGMA integrity_check` result indicates a
+ * healthy database. `better-sqlite3` returns the result as an
+ * array of rows; the canonical OK response is a single row
+ * containing `'ok'`.
+ */
+function isIntegrityOk(result: unknown): boolean {
+  if (!Array.isArray(result)) return false
+  if (result.length !== 1) return false
+  const first = result[0]
+  if (typeof first !== 'object' || first === null) return false
+  // The pragma returns either { integrity_check: 'ok' } or a
+  // column-named row. Accept any single-row response whose
+  // single value is the string 'ok'.
+  const values = Object.values(first as Record<string, unknown>)
+  return values.length === 1 && values[0] === 'ok'
+}
+
+/**
+ * Map a snake_case DB row (returned by `better-sqlite3`) to the
+ * canonical camelCase `BookRow`. The parameter type is the local
+ * `SnakeRow` alias (no separate `BookRowDb` interface) so the
+ * helper doesn't reintroduce a competing name. The only
+ * `BookRow` that crosses the module boundary is the canonical
+ * one above.
+ */
+function rowToBook(row: SnakeRow): BookRow {
+  return {
+    id: row.id,
+    title: row.title,
+    author: row.author,
+    year: row.year,
+    format: row.format,
+    filePath: row.file_path,
+    contentHash: row.content_hash,
+    excerpt: row.excerpt,
+  }
+}
+
+/**
+ * Open the local DB. Lazy: the file is only created on first call
+ * to any helper, so importing this module from a Server Component
+ * during a build (where `process.cwd()` is fine but we don't want
+ * side effects) stays safe.
+ *
+ * PR-3-fix-B #64 (CRITICAL): the FIRST open in a given process
+ * runs `PRAGMA integrity_check`. If the check fails the open
+ * throws so the caller can recover (delete the file + rescan —
+ * see README § "library.sqlite corruption recovery"). Subsequent
+ * opens in the same process skip the check; it's O(file-size)
+ * and would degrade every read.
+ */
+export function openLocalDb(): LocalDb {
+  const path = resolveDbPath()
+  mkdirSync(dirname(path), { recursive: true })
+
+  const handle = new Database(path)
+  handle.pragma('journal_mode = WAL')
+  handle.pragma('foreign_keys = ON')
+
+  // First-open integrity check. ``integrity_check`` returns one
+  // row per finding — when the DB is healthy the single row is
+  // ``'ok'``. Any other response (or a thrown SqliteError)
+  // means the file is corrupt and we surface a clear error.
+  if (!integrityChecked.has(path)) {
+    const result = handle.pragma('integrity_check') as unknown
+    if (!isIntegrityOk(result)) {
+      handle.close()
+      throw new Error(
+        `library.sqlite integrity_check failed for ${path}; ` +
+          `delete the file and rescan to recover (see README § ` +
+          `"library.sqlite corruption recovery"). ` +
+          `pragma returned: ${JSON.stringify(result)}`,
+      )
+    }
+    integrityChecked.add(path)
+  }
+
+  handle.exec(SCHEMA_SQL)
+
+  const insertBookStmt = handle.prepare(`
+    INSERT INTO books (id, title, author, year, format, file_path, content_hash, excerpt)
+    VALUES (@id, @title, @author, @year, @format, @file_path, @content_hash, @excerpt)
+  `)
+
+  const findByIdStmt = handle.prepare(`SELECT * FROM books WHERE id = ?`)
+  const listBooksStmt = handle.prepare(`SELECT * FROM books ORDER BY rowid DESC`)
+  const searchStmt = handle.prepare(`
+    SELECT b.* FROM books b
+    JOIN books_fts ON books_fts.rowid = b.rowid
+    WHERE books_fts MATCH ?
+    ORDER BY rank
+  `)
+  const insertProgressStmt = handle.prepare(`
+    INSERT INTO reading_progress (book_id, current_page, percentage)
+    VALUES (?, ?, ?)
+    ON CONFLICT(book_id) DO UPDATE SET
+      current_page = excluded.current_page,
+      percentage = excluded.percentage,
+      updated_at = datetime('now')
+  `)
+  const getProgressStmt = handle.prepare(`
+    SELECT current_page, percentage FROM reading_progress WHERE book_id = ?
+  `)
+
+  return {
+    insertBook(input: BookInput): BookRow {
+      insertBookStmt.run({
+        id: input.id,
+        title: input.title,
+        author: input.author,
+        year: input.year,
+        format: input.format,
+        file_path: input.filePath,
+        content_hash: input.contentHash,
+        excerpt: input.excerpt,
+      })
+      const row = findByIdStmt.get(input.id) as SnakeRow | undefined
+      if (!row) {
+        throw new Error(`insertBook: row not found after insert (id=${input.id})`)
+      }
+      return rowToBook(row)
+    },
+
+    findById(id: string): BookRow | null {
+      const row = findByIdStmt.get(id) as SnakeRow | undefined
+      return row ? rowToBook(row) : null
+    },
+
+    listBooks(): readonly BookRow[] {
+      const rows = listBooksStmt.all() as SnakeRow[]
+      return rows.map(rowToBook)
+    },
+
+    searchBooks(query: string): readonly BookRow[] {
+      // FTS5 prefix-match the last token so partial words work
+      // ("ficc" matches "Ficciones"). Strip FTS5 operators from user
+      // input to avoid crashing the parser.
+      const sanitized = query
+        .trim()
+        .split(/\s+/)
+        .map((token) => token.replace(/[^\p{L}\p{N}]+/gu, ''))
+        .filter((token) => token.length > 0)
+        .map((token) => `${token}*`)
+        .join(' ')
+      if (sanitized.length === 0) return []
+      const rows = searchStmt.all(sanitized) as SnakeRow[]
+      return rows.map(rowToBook)
+    },
+
+    insertProgress(bookId: string, currentPage: number, percentage: number): void {
+      insertProgressStmt.run(bookId, currentPage, percentage)
+    },
+
+    getProgress(bookId: string): { currentPage: number; percentage: number } | null {
+      const row = getProgressStmt.get(bookId) as
+        | { current_page: number; percentage: number }
+        | undefined
+      if (!row) return null
+      return { currentPage: row.current_page, percentage: row.percentage }
+    },
+
+    pragma(key: string): unknown {
+      return handle.pragma(key)
+    },
+
+    close(): void {
+      handle.close()
+    },
+  }
+}

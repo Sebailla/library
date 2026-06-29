@@ -1,0 +1,43 @@
+{
+  "name": "@alejandria/web",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Next.js 16 + React 19 App Router shell for alejandria-v2. RSC catalog + NAS browse. PR-3A.",
+  "license": "Proprietary",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "dev": "next dev --port 3001",
+    "build": "next build",
+    "start": "next start --port 3001",
+    "lint": "next lint",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@alejandria/sidecar": "file:../../packages/sidecar",
+    "@tanstack/react-query": "^5.62.0",
+    "better-sqlite3": "^11.5.0",
+    "next": "^16.0.0",
+    "pdfjs-dist": "^4.10.38",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "zustand": "^5.0.2"
+  },
+  "devDependencies": {
+    "@testing-library/jest-dom": "^6.6.3",
+    "@testing-library/react": "^16.1.0",
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/node": "^20.16.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "^4.3.4",
+    "eslint": "^9.16.0",
+    "eslint-config-next": "^16.0.0",
+    "jsdom": "^25.0.1",
+    "typescript": "^5.5.4",
+    "vitest": "^2.1.8"
+  }
+}

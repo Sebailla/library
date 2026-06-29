@@ -1,7 +1,15 @@
 import { ChildProcess, SpawnOptions, spawn as defaultSpawn } from 'child_process';
-import { relative as pathRelative, resolve as resolvePath } from 'path';
+import { resolve as resolvePath } from 'path';
 import { Logger } from '@nestjs/common';
 import { UnrecoverableError } from 'bullmq';
+import {
+  sanitizePath as sharedSanitizePath,
+  spawnSidecar as sharedSpawnSidecar,
+  SidecarError as SharedSidecarError,
+  MAX_OUTPUT_BYTES,
+  SPAWN_TIMEOUT_MS,
+  type SpawnSidecarImpl,
+} from '@alejandria/sidecar';
 
 /**
  * JSON envelope every ``alejandria-sidecar`` invocation emits on
@@ -101,6 +109,12 @@ export interface ScanProcessorOptions {
  * ``BACKEND_UNAVAILABLE``, etc.) or, when the sidecar produced no
  * envelope at all, falls back to ``NOT_IMPLEMENTED`` so the BullMQ
  * worker can decide whether to retry.
+ *
+ * PR-3-fix-B: the processor delegates path sanitization and the
+ * spawn-with-cap contract to ``@alejandria/sidecar``. The shared
+ * ``SidecarError`` is translated into THIS local ``SidecarError``
+ * so the existing public surface (with the ``envelope`` field)
+ * stays stable.
  */
 export class SidecarError extends Error {
   readonly code: string;
@@ -135,24 +149,9 @@ export class SidecarError extends Error {
  */
 const DEFAULT_LIBRARY_ROOT = '/share/biblioteca/raw/';
 
-/**
- * Maximum number of bytes the processor will accumulate from
- * ``stdout`` OR ``stderr`` before killing the child (4R review
- * #45). The cap is enforced per-stream so a misbehaving sidecar
- * that spews only to stderr is still caught. 64 MB matches the
- * ``pgroonga`` / large-book index overhead and leaves headroom
- * for the rest of the worker process.
- */
-export const MAX_OUTPUT_BYTES = 64 * 1024 * 1024;
-
-/**
- * Maximum time a single ``spawn`` is allowed to run before the
- * processor SIGKILLs the child (4R review #45). A hung Python
- * interpreter (GIL deadlock, network call inside the sidecar)
- * MUST NOT block the worker forever — the BullMQ retry budget
- * is for transient failures, not infinite hangs.
- */
-export const SPAWN_TIMEOUT_MS = 60_000;
+// Re-exported for callers that imported these from the processor
+// before PR-3-fix-B.
+export { MAX_OUTPUT_BYTES, SPAWN_TIMEOUT_MS };
 
 /**
  * Scan processor — the BullMQ-side half of the
@@ -168,13 +167,13 @@ export const SPAWN_TIMEOUT_MS = 60_000;
  * the spawn contract is pinned by ``test/workers/scan.processor
  * .spec.ts`` in isolation.
  *
- * Path sanitization (#33, 4R review): every ``scan`` job path is
- * resolved against the configured library root and rejected
- * unless it stays inside that root. ``..`` segments, paths that
- * start with ``-`` (argv injection), and absolute paths outside
- * the root all fail fast with ``code = INVALID_PATH`` BEFORE
- * ``spawn`` is invoked — no shell, no ``exec``, no chance of
- * escape.
+ * Path sanitization (#33, 4R review, PR-3-fix-B #60): every
+ * ``scan`` job path is delegated to
+ * ``@alejandria/sidecar.sanitizePath`` — the shared helper
+ * rejects ``..`` segments, paths that start with ``-`` (argv
+ * injection), and absolute paths outside the root, all with
+ * ``code = INVALID_PATH`` BEFORE ``spawn`` is invoked. No shell,
+ * no ``exec``, no chance of escape.
  *
  * Acceptance: the BullMQ worker that wraps this processor MUST
  * catch {@link SidecarError} and ack the job so a corrupt input
@@ -183,10 +182,7 @@ export const SPAWN_TIMEOUT_MS = 60_000;
  */
 export class ScanProcessor {
   private readonly logger = new Logger(ScanProcessor.name);
-  // ``defaultSpawn`` is overloaded; we type the field with the
-  // generic ``SpawnFn`` shape so the test seam and the production
-  // fallback are interchangeable.
-  private readonly spawn: SpawnFn;
+  private readonly spawn: SpawnSidecarImpl;
   private readonly pythonCommand: string;
   private readonly libraryRoot: string;
   /** Per-stream stdout/stderr byte cap (4R review #45). */
@@ -196,8 +192,8 @@ export class ScanProcessor {
 
   constructor(options: ScanProcessorOptions = {}) {
     this.spawn =
-      options.spawn ??
-      (defaultSpawn as unknown as SpawnFn);
+      (options.spawn as unknown as SpawnSidecarImpl) ??
+      (defaultSpawn as unknown as SpawnSidecarImpl);
     this.pythonCommand = options.pythonCommand ?? 'python';
     const rawRoot =
       options.libraryRoot ??
@@ -225,53 +221,15 @@ export class ScanProcessor {
    * ``code = 'INVALID_PATH'`` for any input that would escape the
    * root, inject argv flags, or fail to resolve.
    *
-   * Resolution rules:
-   *
-   *   1. Empty / non-string → ``INVALID_PATH``.
-   *   2. Path starts with ``-`` → ``INVALID_PATH`` (argv
-   *      injection: ``python -m alejandria_sidecar extract -c``
-   *      would be read by ``argparse`` as a flag).
-   *   3. ``path.resolve(root, input)`` is computed and then
-   *      checked against the root via ``path.relative`` so
-   *      ``../`` segments, absolute escapes, and symlinks (where
-   *      supported) all surface the same way.
-   *   4. The resolved absolute path is returned.
+   * PR-3-fix-B: delegates to ``@alejandria/sidecar.sanitizePath``
+   * so the web-side and the NAS-side apply the same hardening.
    */
   private sanitizePath(rawPath: string): string {
-    if (typeof rawPath !== 'string' || rawPath.length === 0) {
-      throw new SidecarError({
-        code: 'INVALID_PATH',
-        exitCode: -1,
-        stderr: '',
-        envelope: null,
-        message: 'scan path is empty or not a string',
-      });
+    try {
+      return sharedSanitizePath(rawPath, { libraryRoot: this.libraryRoot });
+    } catch (err) {
+      throw translateSharedError(err, { envelope: null });
     }
-    if (rawPath.startsWith('-')) {
-      throw new SidecarError({
-        code: 'INVALID_PATH',
-        exitCode: -1,
-        stderr: '',
-        envelope: null,
-        message: `scan path may not start with '-': ${rawPath}`,
-      });
-    }
-    const resolved = resolvePath(this.libraryRoot, rawPath);
-    const rel = pathRelative(this.libraryRoot, resolved);
-    // Empty relative path = the root itself; we accept it so the
-    // sidecar reports FILE_UNREADABLE for the directory. Anything
-    // starting with ``..`` or absolute (``path.isAbsolute``)
-    // escapes the root and is rejected.
-    if (rel === '' || (!rel.startsWith('..') && !rel.startsWith('/'))) {
-      return resolved;
-    }
-    throw new SidecarError({
-      code: 'INVALID_PATH',
-      exitCode: -1,
-      stderr: '',
-      envelope: null,
-      message: `scan path escapes library root (${this.libraryRoot}): ${rawPath}`,
-    });
   }
 
   /**
@@ -280,7 +238,8 @@ export class ScanProcessor {
    * one the sidecar's own ``argparse`` parser expects — see
    * ``alejandria_sidecar/cli.py``.
    *
-   * 4R review #45: the spawn is bounded by two walls:
+   * 4R review #45: the spawn is bounded by two walls, both now
+   * enforced by ``@alejandria/sidecar.spawnSidecar``:
    *
    *   - ``this.maxOutputBytes`` (default 64 MB) — once a stream
    *     accumulates that many bytes we SIGKILL the child and
@@ -290,132 +249,116 @@ export class ScanProcessor {
    *   - ``this.timeoutMs`` (default 60 s) — a setTimeout kills
    *     the child on a hung interpreter. Same outcome: the
    *     rejection is translated to UnrecoverableError.
+   *
+   * Failure routing (mirrors the pre-PR-3-fix-B contract so the
+   * existing ``test/workers/scan.processor.spec.ts`` keeps
+   * passing):
+   *
+   *   - Cap-related failures (``SPAWN_TIMEOUT``,
+   *     ``OUTPUT_OVERFLOW``) → ``UnrecoverableError`` wrapping
+   *     the {@link SidecarError} message (a misbehaving CLI is
+   *     not going to recover on retry).
+   *   - Spawn-time failures (``SPAWN_FAILED``) and non-zero exits
+   *     → bare {@link SidecarError}.
    */
-  private runExtract(path: string): Promise<SidecarEnvelope> {
-    return new Promise<SidecarEnvelope>((resolve, reject) => {
-      const child = this.spawn(this.pythonCommand, [
-        '-m',
-        'alejandria_sidecar',
-        'extract',
-        path,
-      ]);
-
-      let stdout = '';
-      let stderr = '';
-      let stdoutBytes = 0;
-      let stderrBytes = 0;
-      let aborted = false;
-      const abortReason: { code: string; message: string } | null = null;
-
-      const failWith = (code: string, message: string): void => {
-        if (aborted) return;
-        aborted = true;
-        clearTimeout(timer);
-        // SIGKILL the child; the ``exit`` handler is a no-op once
-        // ``aborted`` is set so the rejection is delivered exactly
-        // once. UnrecoverableError makes BullMQ skip remaining
-        // retries (a misbehaving CLI is not going to recover).
-        try {
-          child.kill('SIGKILL');
-        } catch {
-          /* best-effort */
-        }
-        reject(
-          new UnrecoverableError(
+  private async runExtract(path: string): Promise<SidecarEnvelope> {
+    const argv = ['-m', 'alejandria_sidecar', 'extract', path];
+    let result;
+    try {
+      result = await sharedSpawnSidecar(
+        [this.pythonCommand, ...argv],
+        {
+          spawn: this.spawn,
+          timeoutMs: this.timeoutMs,
+          maxOutputBytes: this.maxOutputBytes,
+        },
+      );
+    } catch (err) {
+      if (err instanceof SharedSidecarError) {
+        const code = err.code
+        if (code === 'SPAWN_TIMEOUT' || code === 'OUTPUT_OVERFLOW') {
+          throw new UnrecoverableError(
             new SidecarError({
               code,
               exitCode: -1,
-              stderr,
+              stderr: err.stderr,
               envelope: null,
-              message,
+              message: err.message,
             }).message,
-          ),
-        );
-      };
-
-      child.stdout?.on('data', (chunk: Buffer | string) => {
-        if (aborted) return;
-        const text = chunk.toString('utf8');
-        stdout += text;
-        stdoutBytes += Buffer.byteLength(text, 'utf8');
-        if (stdoutBytes > this.maxOutputBytes) {
-          failWith(
-            'OUTPUT_OVERFLOW',
-            `sidecar stdout exceeded ${this.maxOutputBytes} bytes`,
-          );
+          )
         }
-      });
-      child.stderr?.on('data', (chunk: Buffer | string) => {
-        if (aborted) return;
-        const text = chunk.toString('utf8');
-        stderr += text;
-        stderrBytes += Buffer.byteLength(text, 'utf8');
-        if (stderrBytes > this.maxOutputBytes) {
-          failWith(
-            'OUTPUT_OVERFLOW',
-            `sidecar stderr exceeded ${this.maxOutputBytes} bytes`,
-          );
-        }
-      });
-
-      // Wall-clock cap. SIGKILL the child on a hung interpreter;
-      // the exit handler is a no-op once ``aborted`` is set.
-      const timer = setTimeout(() => {
-        failWith(
-          'SPAWN_TIMEOUT',
-          `sidecar ${this.pythonCommand} timed out after ${this.timeoutMs} ms`,
-        );
-      }, this.timeoutMs);
-      // Keep the event loop alive only while the child is running.
-      if (typeof (timer as { unref?: () => void }).unref === 'function') {
-        (timer as { unref: () => void }).unref();
-      }
-
-      child.on('error', (err) => {
-        if (aborted) return;
-        aborted = true;
-        clearTimeout(timer);
-        reject(
-          new SidecarError({
-            code: 'SPAWN_FAILED',
+        if (code === 'SPAWN_FAILED') {
+          throw new SidecarError({
+            code,
             exitCode: -1,
-            stderr: stderr || err.message,
+            stderr: err.stderr,
             envelope: null,
-            message: `spawn ${this.pythonCommand} failed: ${err.message}`,
-          }),
-        );
-      });
-
-      child.on('exit', (exit) => {
-        if (aborted) return;
-        aborted = true;
-        clearTimeout(timer);
-        const exitCode = exit ?? -1;
-        const envelope = parseEnvelope(stdout);
-        if (exitCode === 0) {
-          resolve(envelope ?? { schema_version: 1, warnings: [] });
-          return;
+            message: err.message,
+          })
         }
-        // Non-zero exit. The sidecar is contractually required to
-        // emit a ``schema_version=1`` envelope even on failure, so
-        // prefer the envelope's ``error.code`` when present and
-        // fall back to a generic ``NOT_IMPLEMENTED`` otherwise.
-        const errorCode = envelope?.error?.code ?? 'NOT_IMPLEMENTED';
-        const message =
-          envelope?.error?.message ??
-          `sidecar exited ${exitCode} with no error envelope`;
-        reject(
-          new SidecarError({
-            code: errorCode,
-            exitCode,
-            stderr,
-            envelope,
-            message,
-          }),
-        );
-      });
+        // INVALID_PATH (raised by spawnSidecar on empty argv) or
+        // anything else from the shared module — propagate as a
+        // local SidecarError.
+        throw new SidecarError({
+          code,
+          exitCode: err.exitCode,
+          stderr: err.stderr,
+          envelope: null,
+          message: err.message,
+        })
+      }
+      throw err
+    }
+    const envelope = parseEnvelope(result.stdout);
+    if (result.exitCode === 0) {
+      return envelope ?? { schema_version: 1, warnings: [] };
+    }
+    // Non-zero exit. The sidecar is contractually required to
+    // emit a ``schema_version=1`` envelope even on failure, so
+    // prefer the envelope's ``error.code`` when present and
+    // fall back to a generic ``NOT_IMPLEMENTED`` otherwise.
+    const errorCode = envelope?.error?.code ?? 'NOT_IMPLEMENTED';
+    const message =
+      envelope?.error?.message ??
+      `sidecar exited ${result.exitCode} with no error envelope`;
+    throw new SidecarError({
+      code: errorCode,
+      exitCode: result.exitCode,
+      stderr: result.stderr,
+      envelope,
+      message,
     });
   }
+}
+
+/**
+ * Translate a ``@alejandria/sidecar`` ``SidecarError`` (or any
+ * other thrown value) into the local ``SidecarError`` that
+ * ``ScanProcessor`` has always exposed. ``envelope`` is
+ * ``null`` on the way in — the local ``SidecarError`` is the
+ * only carrier of an envelope (after the spawn returns and we
+ * parse stdout).
+ */
+function translateSharedError(
+  err: unknown,
+  meta: { envelope: SidecarEnvelope | null },
+): SidecarError {
+  if (err instanceof SharedSidecarError) {
+    return new SidecarError({
+      code: err.code,
+      exitCode: err.exitCode,
+      stderr: err.stderr,
+      envelope: meta.envelope,
+      message: err.message,
+    });
+  }
+  return new SidecarError({
+    code: 'NOT_IMPLEMENTED',
+    exitCode: -1,
+    stderr: err instanceof Error ? err.message : String(err),
+    envelope: meta.envelope,
+    message: err instanceof Error ? err.message : String(err),
+  });
 }
 
 /**
