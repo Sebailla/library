@@ -5,8 +5,7 @@ All notable changes to **alejandria-v2** are documented here. The format follows
 ## [Unreleased]
 
 ### Planned
-- PR3: Next.js 16 app shell (browse + search + reader)
-- PR4: Electron shell + iCloud Drive sync + 7-layer ISBN pipeline
+- Mobile apps (iPad/iPhone React Native)
 
 ### Fixed
 - **monorepo + web + nas-backend (PR-3-fix-B)**: extracted the PR-2E sidecar hardening into a shared `@alejandria/sidecar` workspace package (`sanitizePath`, `spawnSidecar`, `SPAWN_TIMEOUT_MS = 60s`, `MAX_OUTPUT_BYTES = 64 MiB`). Both `apps/web/lib/scan/local-pipeline.ts` and `services/nas-backend/src/workers/scan.processor.ts` now consume the exact same helpers, so the web side no longer reopens argv injection / unbounded stdout / hung-Python interpreter failure modes (issue #60, BLOCKER).
@@ -171,3 +170,53 @@ NODE_ENV=production
 instead of the default NestJS `{ "statusCode": 400, "message": [...] }` shape.
 
 **Discovery endpoint split**: clients that previously called `GET /api/discovery/info` to get `tailscale_ip` and `lan_ips` must now call `GET /api/discovery/network` with a Bearer token. The pre-auth `GET /api/discovery/info` only returns `{mdns_name, port}`.
+
+---
+
+## [0.4.0] — 2026-06-29 — ISBN pipeline + iCloud sync + Electron shell
+
+Fourth release of the `alejandria-v2` refactor. Closes PR4 (Electron + iCloud + ISBN). Comprises 4 chained PRs (PR-4A through PR-4D).
+
+### Added
+
+- **`apps/web/lib/isbn-resolver/`**: 7-layer ISBN resolution pipeline with strict priority order:
+  1. Embedded metadata (PDF XMP / EPUB OPF)
+  2. Regex over first 50,000 chars of extracted text
+  3. OpenLibrary API
+  4. Google Books API
+  5. Apple Vision OCR on cover (provider seam, mock for now)
+  6. Baidu Unlimited-OCR cloud (env-driven endpoint)
+  7. National libraries (LoC + BNE + BN Argentina) fuzzy
+- Each layer testable in isolation; orchestrator tries layers in order with LWW cache
+- **`apps/web/lib/sync/`**: iCloud Drive activity sync (modelo Apple Books):
+  - `path.ts` resolves `~/Library/Mobile Documents/com~apple~cloudDocs/Alejandria/` (overridable via `ALEJANDRIA_ICLOUD_DIR` env for non-Mac dev)
+  - `writer.ts` writes JSON sync files with `version: 1` + `updatedAt`
+  - `conflict-resolver.ts` last-write-wins by `updatedAt` with mtime tiebreaker
+  - `watcher.ts` chokidar wrapper, `.json`-only, with defensive error listener
+  - `sync-engine.ts` orchestrator: pull-on-startup + push-on-write + merge
+- **`apps/mac/`**: Electron 33 shell:
+  - `main.ts` with `contextIsolation: true`, `nodeIntegration: false`, `sandbox: true`
+  - `preload.ts` exposes `window.alejandria` API via `contextBridge` (download, sync, scan, version)
+  - `sidecar-manager.ts` manages Python sidecar lifecycle (lazy start, SIGTERM on quit)
+  - `ipc-handlers.ts` registers IPC handlers
+  - `forge.config.ts` electron-builder config (DMG arm64+x64, hardened runtime, electron-updater pointing at GitHub releases)
+  - `electron-builder.yml` for production packaging
+  - `scripts/verify-dist.cjs` post-build smoke test
+- **`BUILD.md`** at monorepo root with codesign + notarize + publish-release flow
+- End-user README at `apps/mac/README.md` (English + Spanish mirror)
+
+### Stats
+
+- 42 commits since v0.3.0
+- 66 files changed
+- +17,225 / -12 LOC
+- 295 tests passing across 4 packages (apps/web, services/nas-backend, apps/mac, packages/sidecar)
+
+### Pull requests
+
+- PR #72: feat(web): 7-layer ISBN resolution pipeline
+- PR #74: feat(web): iCloud Drive activity sync (modelo Apple Books)
+- PR #76: feat(mac): Electron 33 shell scaffold with preload + IPC
+- PR #78: feat(mac): production build config + codesign docs
+
+See [CHANGELOG.md](https://github.com/Sebailla/library/blob/v0.4.0/CHANGELOG.md) for full details.
