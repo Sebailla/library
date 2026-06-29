@@ -1,18 +1,16 @@
+import type { BookListItem } from '../BookList'
+
 /**
  * Fixture data for BookList tests.
  *
- * Mirrors the shape of the rows returned by `lib/db/local-db.ts`
- * (real implementation in PR-3B). Kept deliberately small and
- * hand-authored so the assertion in BookList.test.tsx is obvious.
+ * After #66, the fixture type is the structural `BookListItem` —
+ * the same shape `<BookList />` consumes as its `books` prop.
+ * The canonical 8-field DB row lives in `@/lib/db/local-db` and
+ * can be projected down to a `BookListItem` for rendering.
  */
-export interface BookFixture {
-  id: string
-  title: string
-  author: string
-  year: number
-}
+export type BookListItemFixture = BookListItem
 
-export const fixtureBooks: readonly BookFixture[] = [
+export const fixtureBooks: readonly BookListItemFixture[] = [
   {
     id: 'book-001',
     title: 'Ficciones',

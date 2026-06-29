@@ -4,6 +4,13 @@ All notable changes to **alejandria-v2** are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- **web (PR-3-fix-A)**: reader route at `/reader/[bookId]` now mounts the real PDF. The page previously called `<Reader book={...} />` without forwarding `book.filePath`, so the `<Reader />` Client Component's `filePath`-gated `PdfSurface` branch was dead code in production (issue #59, BLOCKER).
+- **web (PR-3-fix-A)**: `download-flow` reports the actual bytes received from the `nas-client.downloadFile` `onProgress` callback as `bytesTransferred` to the NAS — not the pre-flight `book.file_size_bytes` expected size, which diverges on partial / resumed / failed transfers (issue #65, CRITICAL).
+
+### Changed
+- **web (PR-3-fix-A)**: consolidated two conflicting `BookRow` types. The canonical 8-field DB row lives in `@/lib/db/local-db`; the component-side 4-field type is now `BookListItem` in `@/components/BookList`. The internal `BookRowDb` shim has been dropped (issue #66, BLOCKER).
+
 ### Planned
 - PR3: Next.js 16 app shell (browse + search + reader)
 - PR4: Electron shell + iCloud Drive sync + 7-layer ISBN pipeline

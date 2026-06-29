@@ -3,7 +3,7 @@
 import dynamic from 'next/dynamic'
 import { useCallback, useMemo, useState } from 'react'
 
-import type { BookRow } from './BookList'
+import type { BookRow } from '@/lib/db/local-db'
 import { ProgressBar } from './ProgressBar'
 import type { PdfBook } from './PdfViewer'
 

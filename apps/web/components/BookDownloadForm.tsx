@@ -4,7 +4,7 @@ import { useState, useTransition } from 'react'
 
 import { downloadFromNas, type ActionResult } from '@/app/_actions/nas-actions'
 import type { DownloadBookResult } from '@/lib/download/download-flow'
-import type { BookRow } from '@/components/BookList'
+import type { BookRow } from '@/lib/db/local-db'
 
 /**
  * "Download" form for a single NAS book (PR-3C).

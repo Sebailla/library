@@ -84,16 +84,19 @@ function makeMockNasClient(
         : async (
             _bookId: number,
             destPath: string,
-            _onProgress: (bytes: number) => void,
+            onProgress: (bytes: number) => void,
             downloadOptions: { writeFile?: (path: string, data: Uint8Array) => Promise<void> } = {},
           ) => {
             // The real nas-client's `downloadFile` delegates the
-            // body write to the injected writer. Mirror that here
-            // so the test can assert on the bytes path the
-            // production code chooses.
+            // body write to the injected writer AND fires
+            // `onProgress(totalBytes)` after the chunk has been
+            // materialised. Mirror that here so the test can assert
+            // on the bytes path the production code chooses.
             const writeFile = downloadOptions.writeFile
+            const payload = new Uint8Array([1, 2, 3, 4, 5])
+            onProgress(payload.byteLength)
             if (writeFile) {
-              await writeFile(destPath, new Uint8Array([1, 2, 3, 4, 5]))
+              await writeFile(destPath, payload)
             }
           },
     ),
@@ -151,13 +154,17 @@ describe('download-flow (PR-3C)', () => {
     expect(order).toBeLessThan(downloadOrder)
 
     // 3. completeDownload must run AFTER downloadFile, and must
-    //    report the final byte count.
+    //    report the ACTUAL byte count — not the pre-flight expected
+    //    size. The mock downloadFile writes exactly 5 bytes via the
+    //    injected writer (mirroring `writeFile(destPath, new
+    //    Uint8Array([1, 2, 3, 4, 5]))`). If the flow regresses to
+    //    `book.file_size_bytes ?? 0`, this assertion catches it.
     expect(nas.completeDownload).toHaveBeenCalledTimes(1)
     const completeOrder = nas.completeDownload.mock.invocationCallOrder[0]!
     expect(downloadOrder).toBeLessThan(completeOrder)
     expect(nas.completeDownload).toHaveBeenCalledWith(99, {
       completed: true,
-      bytesTransferred: 1_000,
+      bytesTransferred: 5,
     })
 
     expect(result.downloadId).toBe(99)
@@ -238,5 +245,55 @@ describe('download-flow (PR-3C)', () => {
 
     expect(writers).toHaveLength(1)
     expect(writers[0]!.path).toBe(join(tmpDir, 'ficciones.pdf'))
+  })
+
+  it('reports ACTUAL bytes received (from onProgress) to completeDownload, not the expected size', async () => {
+    // RED test for #65. The mock downloadFile reports a single
+    // onProgress(total) call with the 5-byte write. The flow must
+    // thread THAT count into `bytesTransferred`, not
+    // `SAMPLE_BOOK.file_size_bytes` (1_000).
+    //
+    // We use a custom mock that fires onProgress with a known,
+    // distinct value so the assertion cannot accidentally pass
+    // because of the existing 1_000 expectation.
+    let observedBytes = 0
+    const nas: InMemoryNasClient = {
+      ...makeMockNasClient(),
+      downloadFile: vi.fn(
+        async (
+          _bookId: number,
+          destPath: string,
+          onProgress: (bytes: number) => void,
+          downloadOptions: { writeFile?: (path: string, data: Uint8Array) => Promise<void> } = {},
+        ) => {
+          const payload = new Uint8Array([10, 20, 30, 40, 50, 60, 70]) // 7 bytes
+          onProgress(payload.byteLength)
+          observedBytes = payload.byteLength
+          const writeFile = downloadOptions.writeFile
+          if (writeFile) {
+            await writeFile(destPath, payload)
+          }
+        },
+      ),
+    }
+
+    await downloadBook({
+      bookId: 7,
+      deviceId: 'device-1',
+      deviceName: 'iPad',
+      userId: 'user-1',
+      destPath: join(tmpDir, 'ficciones.pdf'),
+      nasClient: nas,
+      writeFile: makeInMemoryWriter(),
+    })
+
+    // The mock fired onProgress(7) — the flow must thread 7
+    // (the actual bytes received) into completeDownload, NOT
+    // SAMPLE_BOOK.file_size_bytes (1_000) or 0.
+    expect(observedBytes).toBe(7)
+    expect(nas.completeDownload).toHaveBeenCalledWith(99, {
+      completed: true,
+      bytesTransferred: 7,
+    })
   })
 })

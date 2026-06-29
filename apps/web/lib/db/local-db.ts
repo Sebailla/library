@@ -150,7 +150,14 @@ CREATE TRIGGER IF NOT EXISTS books_au AFTER UPDATE ON books BEGIN
 END;
 `
 
-interface BookRowDb {
+// After #66: `BookRowDb` (the snake_case internal row used by
+// `better-sqlite3`) has been dropped. Its 8-field shape is now
+// inlined into `rowToBook`'s parameter type, and the only
+// `BookRow` that crosses the module boundary is the canonical
+// camelCase shape declared above. A local `type` alias keeps the
+// `better-sqlite3` cast sites readable without re-introducing a
+// named interface that could leak from the module.
+type SnakeRow = {
   id: string
   title: string
   author: string
@@ -161,7 +168,15 @@ interface BookRowDb {
   excerpt: string
 }
 
-function rowToBook(row: BookRowDb): BookRow {
+/**
+ * Map a snake_case DB row (returned by `better-sqlite3`) to the
+ * canonical camelCase `BookRow`. The parameter type is the local
+ * `SnakeRow` alias (no separate `BookRowDb` interface) so the
+ * helper doesn't reintroduce a competing name. The only
+ * `BookRow` that crosses the module boundary is the canonical
+ * one above.
+ */
+function rowToBook(row: SnakeRow): BookRow {
   return {
     id: row.id,
     title: row.title,
@@ -226,7 +241,7 @@ export function openLocalDb(): LocalDb {
         content_hash: input.contentHash,
         excerpt: input.excerpt,
       })
-      const row = findByIdStmt.get(input.id) as BookRowDb | undefined
+      const row = findByIdStmt.get(input.id) as SnakeRow | undefined
       if (!row) {
         throw new Error(`insertBook: row not found after insert (id=${input.id})`)
       }
@@ -234,12 +249,12 @@ export function openLocalDb(): LocalDb {
     },
 
     findById(id: string): BookRow | null {
-      const row = findByIdStmt.get(id) as BookRowDb | undefined
+      const row = findByIdStmt.get(id) as SnakeRow | undefined
       return row ? rowToBook(row) : null
     },
 
     listBooks(): readonly BookRow[] {
-      const rows = listBooksStmt.all() as BookRowDb[]
+      const rows = listBooksStmt.all() as SnakeRow[]
       return rows.map(rowToBook)
     },
 
@@ -255,7 +270,7 @@ export function openLocalDb(): LocalDb {
         .map((token) => `${token}*`)
         .join(' ')
       if (sanitized.length === 0) return []
-      const rows = searchStmt.all(sanitized) as BookRowDb[]
+      const rows = searchStmt.all(sanitized) as SnakeRow[]
       return rows.map(rowToBook)
     },
 

@@ -1,11 +1,14 @@
 /**
  * Minimal shape BookList needs to render a row.
  *
- * Kept structural rather than reusing the full local-db `Book`
+ * Kept structural rather than reusing the full local-db `BookRow`
  * (which lands in PR-3B) so the component stays decoupled from
  * the storage layer and tests stay fast — pure props in, JSX out.
+ *
+ * After #66: this is `BookListItem`, NOT `BookRow`. `BookRow`
+ * lives in `@/lib/db/local-db` as the canonical 8-field DB row.
  */
-export interface BookRow {
+export interface BookListItem {
   id: string
   title: string
   author: string
@@ -20,7 +23,7 @@ export interface BookRow {
  * Each row's accessible name is the book's title, which is the
  * contract the BookList.test.tsx assertion depends on.
  */
-export function BookList({ books }: { books: readonly BookRow[] }): React.JSX.Element {
+export function BookList({ books }: { books: readonly BookListItem[] }): React.JSX.Element {
   return (
     <ul aria-label="Library catalog">
       {books.map((book) => (
