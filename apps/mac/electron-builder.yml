@@ -1,0 +1,60 @@
+# electron-builder configuration for `@alejandria/mac` (PR-4D, issue #77).
+#
+# This file is read by electron-builder to turn the compiled `dist/`
+# (produced by electron-forge via `npm run make`) into a codesigned,
+# notarised DMG that auto-updates through `electron-updater`.
+#
+# The shape mirrors `forge.config.ts`: same bundle id, same `app://`
+# URL scheme, same Education category. Keep them in lock-step so the
+# codesign identity registered by `npm install` (via Keychain) lines
+# up regardless of which packager wrote the artifact.
+#
+# Production flow:
+#   1. `npm run build`      → tsc -p tsconfig.build.json → dist/
+#   2. `npm run package`    → electron-forge package → out/Alejandría-darwin-*/
+#   3. `npm run dist`       → electron-builder --mac → release/Alejandría-*.dmg
+#                            + release/latest-mac.yml (the update manifest)
+#
+# Codesigning + notarization credentials are pulled from the
+# environment (see BUILD.md at the repo root) so the same config can
+# be reused in CI without committing secrets.
+
+appId: com.alejandria.app
+productName: Alejandría
+copyright: Copyright © 2026 Sebailla
+
+# electron-updater pulls the next version from GitHub Releases.
+# `releaseType: release` keeps the manifest name `latest-mac.yml`,
+# which is what electron-updater looks for on macOS (NOT `latest.yml`,
+# which is the cross-platform default and would clash if we ever
+# added Linux/Windows updaters).
+publish:
+  provider: github
+  owner: Sebailla
+  repo: library
+  releaseType: release
+
+mac:
+  category: public.app-category.education
+  target:
+    - target: dmg
+      arch:
+        - arm64
+        - x64
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  # Deep link from forge.config.ts — must be re-declared here so
+  # electron-builder's Info.plist overlay keeps the URL scheme
+  # registered after the codesign pass.
+  extendInfo:
+    NSHumanReadableCopyright: Copyright © 2026 Sebailla
+
+protocols:
+  - name: alejandria
+    schemes:
+      - app
+
+# electron-updater is wired through `npm install` (see runtime dep
+# in package.json). The `main` process calls `autoUpdater.checkForUpdates()`
+# after the window is ready; the manifest endpoint is derived from
+# `publish` above (github.com/Sebailla/library/releases/latest/download/latest-mac.yml).

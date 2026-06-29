@@ -1,10 +1,116 @@
 # `@alejandria/mac`
 
-Shell de Electron 33 para la app macOS de alejandria-v2 (PR-4C, issue #75).
+Shell de Electron 33 para la app macOS de alejandria-v2 (scaffold
+de PR-4C, build de producción en PR-4D).
 
-Este paquete aloja la UI web de Next.js en una ventana nativa, expone un puente IPC `window.alejandria` al renderer, y supervisa el proceso del sidecar de Python. Es la contraparte de escritorio del servidor de desarrollo de Next.js en `apps/web`.
+Este paquete aloja la UI web de Next.js en una ventana nativa,
+expone un puente IPC `window.alejandria` al renderer, y supervisa
+el proceso del sidecar de Python. Es la contraparte de escritorio
+del servidor de desarrollo de Next.js en `apps/web`.
 
-## Arquitectura
+## Para usuarios finales — instalar y ejecutar Alejandría
+
+Si descargaste el DMG de un release (por ej.
+`https://github.com/Sebailla/library/releases`), esta sección es
+para vos.
+
+### Instalación
+
+1. Abrí el DMG (`Alejandría-X.Y.Z.dmg`) que descargaste.
+2. **Arrastrá el ícono `Alejandría` al acceso directo de
+   `Aplicaciones`.**
+3. Si ya tenías una versión anterior instalada, el DMG te pide
+   confirmar; hacé clic en "Reemplazar".
+4. Expulsá el DMG.
+
+### Primer arranque
+
+Gatekeeper de macOS va a bloquear el primer lanzamiento porque la
+app está firmada con un certificado **Developer ID Application**
+(no es de la Mac App Store). Dos formas de pasar la validación:
+
+- **Hacé clic derecho en la app** dentro de `/Aplicaciones/` y
+  elegí `Abrir`. Confirmá el diálogo de aviso la primera vez. Los
+  lanzamientos siguientes se comportan normalmente.
+- O andá a `Configuración del Sistema → Privacidad y seguridad`,
+  bajá hasta el fondo, y hacé clic en `Abrir de todas formas`
+  junto al mensaje que menciona a `Alejandría`. Después arrancala
+  normalmente.
+
+Después del primer arranque la app registra el esquema de deep
+link `app://`; ya podés cerrar el aviso y empezar a leer.
+
+### Emparejar con el NAS
+
+La primera vez que abrís la app te guía por el emparejamiento:
+
+1. Elegí `Emparejar con NAS…` desde el menú de nivel superior.
+2. Ingresá el código de invitación `nas://...` que te envió el
+   administrador del NAS (ver `services/nas-backend/README.md`
+   para el flujo del operador).
+3. La app guarda las credenciales en el Llavero del sistema (NO en
+   texto plano). Para auditar o revocar, abrí `Acceso a Llaveros`
+   y buscá `Alejandría`.
+
+Después del emparejamiento, la app puede hacer pull y push de tu
+biblioteca tocando el botón `Sincronizar ahora` en la pantalla
+inicial.
+
+### Dónde viven tus datos
+
+| Qué | Dónde en disco |
+|-----|----------------|
+| Caché local de la biblioteca (metadata de libros, portadas) | `~/Library/Application Support/alejandria/library.sqlite` |
+| Archivos de libros descargados | `~/Library/Application Support/alejandria/books/` |
+| Logs del sidecar (proceso Python) | `~/Library/Logs/alejandria/sidecar.log` |
+| Anotaciones + estado de lectura sincronizado vía iCloud | `~/Library/Mobile Documents/iCloud~com~alejandria~app/` |
+
+### Sincronización por iCloud
+
+Si iniciás sesión con el Apple ID del dueño de la Mac (y tenés
+iCloud Drive activado), las `posiciones de lectura`, `subrayados`,
+`notas` y `estado de la estantería` se espejan en la carpeta
+`Alejandría` dentro de iCloud Drive. Otros dispositivos Apple que
+usen la misma cuenta de iCloud ven la metadata en ~30 segundos.
+**Los archivos de libros nunca entran a iCloud — sólo la
+metadata.**
+
+Para alternar la sincronización por iCloud:
+
+```
+Configuración → Sincronización → iCloud Drive (toggle on/off)
+```
+
+Desactivarla conserva los datos locales existentes pero detiene la
+sincronización futura. Reactivarla fusiona cualquier desvío que tus
+dispositivos hayan acumulado mientras estaba apagada.
+
+### Actualización
+
+La app usa `electron-updater`. En cada lanzamiento consulta
+`https://github.com/Sebailla/library/releases/latest/download/latest-mac.yml`
+y descarga el siguiente DMG en segundo plano. Vas a ver un chip
+pequeño `Actualización lista para instalar` arriba a la derecha —
+tocálo para relanzar con la versión nueva.
+
+Si tu máquina está offline o la publicación no está firmada, podés
+actualizar manualmente repitiendo los pasos de Instalación.
+
+### Desinstalación
+
+```
+rm -rf "/Applications/Alejandría.app"
+rm -rf ~/Library/Application\ Support/alejandria
+rm -rf ~/Library/Logs/alejandria
+# Los datos de iCloud viven en la carpeta del sistema Drive — usá el
+# Finder para eliminar el subdirectorio `Alejandría` si querés un
+# borrado total.
+```
+
+El próximo lanzamiento va a pedir credenciales de emparejamiento
+nuevas.
+
+## Para contribuidores — arquitectura y scripts
 
 ```
 ┌──────────────────────────────┐
@@ -37,15 +143,17 @@ Este paquete aloja la UI web de Next.js en una ventana nativa, expone un puente 
 
 | Comando            | Qué hace                                                     |
 |--------------------|--------------------------------------------------------------|
-| `npm test`         | Ejecuta la suite de vitest (26 tests en 4 archivos).         |
+| `npm test`         | Ejecuta la suite de vitest (40 tests en 7 archivos).         |
 | `npm run typecheck`| `tsc --noEmit` contra el tsconfig completo.                  |
 | `npm run build`    | Compila `src/*.ts` a `dist/*.js` (input para electron-forge).|
 | `npm run dev`      | Arranca Electron en modo dev (carga `http://localhost:3001`).|
 | `npm run start`    | Igual que `dev` (alias).                                     |
 | `npm run package`  | `electron-forge package` — produce un build mac sin firmar.  |
 | `npm run make`     | `electron-forge make` — produce un artefacto DMG + ZIP.      |
+| `npm run dist`     | `electron-builder --mac` — produce un DMG codesigned y notarizado (ver `BUILD.md`). |
 
-Para que `npm run dev` / `npm run start` sea útil, arrancá el servidor de desarrollo de Next.js en otra terminal primero:
+Para que `npm run dev` / `npm run start` sea útil, arrancá el
+servidor de desarrollo de Next.js en otra terminal primero:
 
 ```sh
 cd ../web
@@ -55,14 +163,24 @@ npm run dev
 
 ## Modelo de seguridad
 
-El renderer es una app Next.js plana que no sabe que está corriendo dentro de Electron. Para mantenerlo así:
+El renderer es una app Next.js plana que no sabe que está
+corriendo dentro de Electron. Para mantenerlo así:
 
-- `contextIsolation: true` — el renderer y el preload corren en contextos JS separados; nada se filtra entre ellos.
-- `nodeIntegration: false` — el renderer no tiene `require`, ni `process`, ni `Buffer`.
-- `sandbox: true` — el propio script de preload corre en un proceso restringido.
-- `preload.ts` es el **único** lugar que toca `contextBridge`. Publica una superficie congelada y tipada en `window.alejandria`; el renderer puede llamar a los cuatro métodos pero no puede reemplazar las implementaciones.
-- `webContents.setWindowOpenHandler` abre cada enlace externo en el navegador por defecto del usuario (niega todos los `window.open` desde dentro de la app).
-- `webContents.on('will-navigate', …)` bloquea navegaciones dentro de la app que se alejen de la URL del renderer.
+- `contextIsolation: true` — el renderer y el preload corren en
+  contextos JS separados; nada se filtra entre ellos.
+- `nodeIntegration: false` — el renderer no tiene `require`, ni
+  `process`, ni `Buffer`.
+- `sandbox: true` — el propio script de preload corre en un
+  proceso restringido.
+- `preload.ts` es el **único** lugar que toca `contextBridge`.
+  Publica una superficie congelada y tipada en
+  `window.alejandria`; el renderer puede llamar a los cuatro
+  métodos pero no puede reemplazar las implementaciones.
+- `webContents.setWindowOpenHandler` abre cada enlace externo en
+  el navegador por defecto del usuario (niega todos los
+  `window.open` desde dentro de la app).
+- `webContents.on('will-navigate', …)` bloquea navegaciones
+  dentro de la app que se alejen de la URL del renderer.
 
 ## Superficie de canales IPC
 
@@ -75,7 +193,9 @@ El renderer es una app Next.js plana que no sabe que está corriendo dentro de E
 
 ## Contrato del sidecar
 
-El sidecar de Python emite un sobre JSON versionado en stdout. El parser en `src/sidecar-client.ts` refleja la misma forma usada por `apps/web/lib/scan/local-pipeline.ts`:
+El sidecar de Python emite un sobre JSON versionado en stdout. El
+parser en `src/sidecar-client.ts` refleja la misma forma usada por
+`apps/web/lib/scan/local-pipeline.ts`:
 
 ```jsonc
 // Éxito
@@ -99,14 +219,32 @@ El sidecar de Python emite un sobre JSON versionado en stdout. El parser en `src
 }
 ```
 
-El parser lanza `SidecarEnvelopeError` (con `code` y `sidecarMessage`) ante sobres de error para que la capa IPC propague la falla al renderer sin perder el código de error original del sidecar.
+El parser lanza `SidecarEnvelopeError` (con `code` y
+`sidecarMessage`) ante sobres de error para que la capa IPC
+propague la falla al renderer sin perder el código de error
+original del sidecar.
 
 ## Plan de tests
 
-- `npm test` — 26 tests unitarios cubriendo `preload`, `sidecar-manager`, `ipc-handlers` y `sidecar-client`.
-- `npm run build` — `tsc -p tsconfig.build.json` compila `src/*.ts` → `dist/*.js` sin errores.
-- `npm run start` — arranca Electron en modo dev y carga `http://localhost:3001` (requiere el servidor de desarrollo de Next.js).
+- `npm test` — 40 tests unitarios cubriendo `preload`,
+  `sidecar-manager`, `ipc-handlers`, `sidecar-client`,
+  `electron-builder`, `npmrc`, y `verify-dist`.
+- `npm run build` — `tsc -p tsconfig.build.json` compila
+  `src/*.ts` → `dist/*.js` sin errores.
+- `npm run start` — arranca Electron en modo dev y carga
+  `http://localhost:3001` (requiere el servidor de desarrollo de
+  Next.js).
+- `node apps/mac/scripts/verify-dist.cjs` — smoke test del `.app`
+  ya construido (corrélo desde la raíz del repo).
+
+Ver `BUILD.md` en la raíz del repositorio para el flujo de release
+completo (codesign + notaría + publicación en GitHub Releases +
+auto-update).
 
 ## Estado
 
-Scaffold de PR-4C. El downloader y el syncer son stubs que devuelven `{ ok: true, transport: 'stub' }`; PR-4 los cableará a las implementaciones reales.
+Scaffold de PR-4D. El downloader y el syncer son stubs que
+devuelven `{ ok: true, transport: 'stub' }`; un PR futuro los
+cableará a las implementaciones reales. El pipeline de
+codesign + notaría está documentado pero todavía no se ejecutó de
+principio a fin en un runner.
