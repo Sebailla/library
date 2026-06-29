@@ -12,6 +12,7 @@ import { DownloadsModule } from './downloads/downloads.module';
 import { WorkersModule } from './workers/workers.module';
 import { DiscoveryModule } from './discovery/discovery.module';
 import { FilesModule } from './files/files.module';
+import { LibrariesModule } from './libraries/libraries.module';
 
 /**
  * Reshape {@link ThrottlerException} into the project's standard
@@ -67,6 +68,15 @@ class ThrottlerExceptionFilter implements ExceptionFilter {
  * ``BOOKS_REPOSITORY`` so the path validation can look up
  * ``books.file_path`` without a second DB connection.
  *
+ * PR-N2 adds the ``LibrariesModule`` which exposes the
+ * ``/api/libraries`` HTTP surface — CRUD over the
+ * ``libraries`` table, per-device active library activation,
+ * and creator-only authorisation for PATCH / DELETE. The
+ * module imports ``BooksModule`` so the
+ * ``LIBRARY_BOOK_COUNT`` adapter can call
+ * ``BOOKS_REPOSITORY.countByLibrary`` to enforce the
+ * "refuse DELETE when books are indexed" rule.
+ *
  * Rate limiting (#34, 4R review): ``ThrottlerModule`` is
  * registered with three named buckets (see ``throttlers`` array
  * below) and the ``ThrottlerGuard`` is bound as a global APP_GUARD
@@ -101,6 +111,7 @@ class ThrottlerExceptionFilter implements ExceptionFilter {
     WorkersModule,
     DiscoveryModule,
     FilesModule,
+    LibrariesModule,
   ],
   providers: [
     {

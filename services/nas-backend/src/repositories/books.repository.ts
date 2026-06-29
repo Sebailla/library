@@ -63,6 +63,7 @@ export interface BooksRepository {
   list(opts?: PaginationOpts & ListFilters): Promise<Book[]>;
   count(filters?: ListFilters): Promise<number>;
   search(query: string, opts?: PaginationOpts): Promise<Book[]>;
+  countByLibrary(libraryId: number): Promise<number>;
   close(): Promise<void>;
 }
 
@@ -232,6 +233,19 @@ export class PgBooksRepository implements BooksRepository {
       [query],
       opts,
     );
+  }
+
+  /**
+   * Count the books currently indexed for the given library.
+   * The libraries service uses this to refuse DELETE with 409
+   * LIBRARY_NOT_EMPTY when the count is non-zero.
+   */
+  async countByLibrary(libraryId: number): Promise<number> {
+    const res = await this.pool.query<{ count: string }>(
+      'SELECT COUNT(*)::int AS count FROM books WHERE library_id = $1',
+      [libraryId],
+    );
+    return Number(res.rows[0].count);
   }
 
   async close(): Promise<void> {
