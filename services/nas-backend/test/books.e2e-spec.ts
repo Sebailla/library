@@ -113,6 +113,7 @@ interface InMemoryBook {
   contentHash: string | null;
   coverPath: string | null;
   excerpt: string | null;
+  libraryId: number | null;
   indexedAt: Date;
 }
 
@@ -120,10 +121,11 @@ class InMemoryBooksRepository {
   private rows: InMemoryBook[] = [];
   private nextId = 1;
 
-  async insert(book: Omit<InMemoryBook, 'id' | 'indexedAt'>): Promise<InMemoryBook> {
+  async insert(book: Omit<InMemoryBook, 'id' | 'indexedAt' | 'libraryId'> & { libraryId?: number | null }): Promise<InMemoryBook> {
     const row: InMemoryBook = {
       id: this.nextId++,
       indexedAt: new Date(),
+      libraryId: null,
       ...book,
     };
     this.rows.push(row);
@@ -140,6 +142,7 @@ class InMemoryBooksRepository {
     authorId?: number;
     format?: string;
     language?: string;
+    libraryId?: number;
   } = {}): Promise<InMemoryBook[]> {
     let filtered = this.rows;
     if (opts.authorId !== undefined) {
@@ -151,6 +154,9 @@ class InMemoryBooksRepository {
     if (opts.language !== undefined) {
       filtered = filtered.filter((b) => b.language === opts.language);
     }
+    if (opts.libraryId !== undefined) {
+      filtered = filtered.filter((b) => b.libraryId === opts.libraryId);
+    }
     const sorted = [...filtered].sort((a, b) => a.id - b.id);
     const offset = opts.offset ?? 0;
     const limit = opts.limit ?? 20;
@@ -161,6 +167,7 @@ class InMemoryBooksRepository {
     authorId?: number;
     format?: string;
     language?: string;
+    libraryId?: number;
   } = {}): Promise<number> {
     let filtered = this.rows;
     if (filters.authorId !== undefined) {
@@ -172,7 +179,14 @@ class InMemoryBooksRepository {
     if (filters.language !== undefined) {
       filtered = filtered.filter((b) => b.language === filters.language);
     }
+    if (filters.libraryId !== undefined) {
+      filtered = filtered.filter((b) => b.libraryId === filters.libraryId);
+    }
     return filtered.length;
+  }
+
+  async countByLibrary(libraryId: number): Promise<number> {
+    return this.rows.filter((b) => b.libraryId === libraryId).length;
   }
 
   async close(): Promise<void> {}

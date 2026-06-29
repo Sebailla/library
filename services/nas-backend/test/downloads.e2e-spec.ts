@@ -146,6 +146,10 @@ class InMemoryBooksRepository {
     return this.rows.length;
   }
 
+  async countByLibrary(_libraryId: number): Promise<number> {
+    return 0;
+  }
+
   async close(): Promise<void> {}
 }
 
