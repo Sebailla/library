@@ -8,6 +8,14 @@ import {
 } from './libraries.types';
 
 /**
+ * String token used to inject the {@link LibrariesRepository}
+ * inside the NestJS container. Tests override the binding via
+ * ``Test.createTestingModule().overrideProvider()`` so the
+ * service contract can be pinned in isolation.
+ */
+export const LIBRARIES_REPOSITORY = 'LIBRARIES_REPOSITORY';
+
+/**
  * pg-backed repository for the ``libraries`` and
  * ``device_libraries`` tables (PR-N2).
  *
