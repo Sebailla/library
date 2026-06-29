@@ -29,7 +29,8 @@ biblioteca-v2/
 | PR-3A | Next.js 16 scaffold + RSC catalog browse (`apps/web/`) | Merged |
 | PR-3B | Real local SQLite + FTS5 + scan pipeline + PDF reader (`apps/web/`) | Merged |
 | PR-3C | NAS client + Range-request download + server actions + pdfjs (`apps/web/`) | Merged |
-| PR-4A | 7-layer ISBN resolution pipeline (`apps/web/lib/isbn-resolver/`) | **This PR** |
+| PR-4A | 7-layer ISBN resolution pipeline (`apps/web/lib/isbn-resolver/`) | Merged |
+| PR-4B | iCloud Drive activity sync layer (`apps/web/lib/sync/`) | **This PR** |
 | PR4 | Electron shell + iCloud Drive (full PR4) | Pending |
 
 ## Running `apps/web/` (PR-3C)
@@ -356,6 +357,85 @@ ever see valid ISBN-13s.
 | Var | Used by | Behavior |
 |-----|---------|----------|
 | `UNLIMITED_OCR_ENDPOINT` | Layer 6 | When unset, layer 6 is skipped silently. |
+
+## iCloud Drive activity sync (PR-4B, issue #73)
+
+`apps/web/lib/sync/` ships the iCloud Drive activity
+sync layer that mirrors notes, highlights, bookmarks,
+and reading progress across every device the user owns
+— without us running a server. The layout is exactly
+what Apple Books uses: per-activity JSON files under a
+single directory that iCloud propagates automatically.
+
+```
+~/Library/Mobile Documents/com~apple~cloudDocs/Alejandria/
+├── notes/<bookId>.json
+├── highlights/<bookId>.json
+├── bookmarks/<bookId>.json
+└── progress/<bookId>.json
+```
+
+Each file is a self-describing envelope (`version: 1`,
+`bookId`, `category`, `updatedAt`, plus the payload).
+Two writes racing across devices resolve by
+last-write-wins on `updatedAt`, with the OS-level mtime
+as a tiebreaker — matching Apple Books's policy rather
+than inventing our own.
+
+### Module layout
+
+| File | Responsibility |
+|------|----------------|
+| `lib/sync/types.ts` | `Note`, `Highlight`, `Bookmark`, `ReadingProgress`, `SyncFile`, `WatcherEvent`, `Watcher`, `SyncFs` |
+| `lib/sync/path.ts` | `getICloudDir()` (env-aware), `getSyncFilePath()` |
+| `lib/sync/writer.ts` | `writeSyncFile()` — JSON with `version: 1` + `updatedAt` stamp |
+| `lib/sync/conflict-resolver.ts` | `resolveSyncConflict()` — LWW with mtime tiebreaker |
+| `lib/sync/watcher.ts` | `createWatcher()` — chokidar wrapper, fires `WatcherEvent`s |
+| `lib/sync/sync-engine.ts` | `createSyncEngine()` — orchestrates pull / push / merge |
+| `lib/sync/engine-factory.ts` | `createDefaultEngine()` — wires the real `node:fs` + chokidar |
+| `lib/sync/index.ts` | Public surface |
+
+### Wiring it up (production)
+
+```ts
+import { createDefaultEngine } from '@/lib/sync'
+
+const engine = createDefaultEngine() // honours $ALEJANDRIA_ICLOUD_DIR
+await engine.start()                  // pull-on-startup
+await engine.push({                   // push-on-write
+  category: 'notes',
+  bookId: bookId,
+  data: note,
+})
+engine.onChange((sf) => {
+  // refresh reader UI, etc.
+})
+```
+
+### Wiring it up (tests)
+
+```ts
+import {
+  createSyncEngine,
+  type ManualWatcher,
+  resolveSyncConflict,
+} from '@/lib/sync/sync-engine'
+
+const watcher: ManualWatcher = makeManualWatcher()
+const engine = createSyncEngine({
+  icloudDir: '/tmp/test-alejandria',
+  fs: myInMemoryFs,
+  watcher,
+  decode: (raw) => myValidate(raw),
+  resolveConflict: resolveSyncConflict,
+})
+```
+
+### Environment variables
+
+| Var | Used by | Behavior |
+|-----|---------|----------|
+| `ALEJANDRIA_ICLOUD_DIR` | `getICloudDir()` | Absolute or relative path; when set, replaces the macOS default. Lets non-macOS dev machines and CI exercise the sync layer against a tmp dir. |
 
 ## Observability (PR-3-fix-C, #61)
 
