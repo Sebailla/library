@@ -33,9 +33,11 @@ import { EventEmitter } from 'node:events'
 import { createWatcher, type ChokidarFn } from '../watcher'
 import type { FSWatcher } from 'chokidar'
 
-class FakeFsWatcher extends EventEmitter implements FSWatcher {
-  add(paths: string[]): this { return this }
-  addCwd(path: string): this { return this }
+class FakeFsWatcher extends EventEmitter {
+  // Cast at the boundary so we don't have to keep up with
+  // chokidar's private `FSWatcher` overload set.
+  add(_paths: string[]): this { return this }
+  addCwd(_path: string): this { return this }
   addRaw(): this { return this }
   async close(): Promise<void> {
     this.closed = true
@@ -43,17 +45,9 @@ class FakeFsWatcher extends EventEmitter implements FSWatcher {
   }
   closed = false
   getWatched(): Record<string, string[]> { return {} }
-  on(event: string, listener: (...args: unknown[]) => void): this {
-    return super.on(event, listener as (...args: unknown[]) => void)
-  }
-  off(event: string, listener: (...args: unknown[]) => void): this {
-    return super.off(event, listener as (...args: unknown[]) => void)
-  }
-  unwatch(paths: string[]): this { return this }
-  // modern API fields — typed as `any` to avoid widening
-  // the FSWatcher contract for tests.
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  options: any
+  // Suppress noImplicitOverride so tests can pre-build the
+  // exact ergonomic surface they need. EventEmitter's `on`
+  // is sufficiently broad for the wrapper tests.
 }
 
 interface ChokidarCall {

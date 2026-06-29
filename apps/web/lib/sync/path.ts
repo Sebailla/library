@@ -53,9 +53,14 @@ export const ICLOUD_DIR_ENV = 'ALEJANDRIA_ICLOUD_DIR'
  * caller never has to think about relative vs absolute —
  * chokidar expects absolute paths and so does the
  * conflict resolver when it compares mtimes.
+ *
+ * `env` is typed structurally (`Record<string, string |
+ * undefined>`) rather than as `NodeJS.ProcessEnv` so
+ * tests can pass a literal without dragging in `NODE_ENV`
+ * or the rest of the production process.env fields.
  */
 export function getICloudDir(
-  env: NodeJS.ProcessEnv = process.env,
+  env: Record<string, string | undefined> = process.env as unknown as Record<string, string | undefined>,
   homedir: () => string = os.homedir,
 ): string {
   const override = env[ICLOUD_DIR_ENV]

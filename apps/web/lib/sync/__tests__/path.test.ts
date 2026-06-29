@@ -51,7 +51,7 @@ describe('sync/path (PR-4B, #73)', () => {
   })
 
   it('falls back to the macOS default under homedir when env is unset', () => {
-    const env: NodeJS.ProcessEnv = {}
+    const env: Record<string, string | undefined> = {}
     expect(getICloudDir(env, () => HOMEDIR)).toBe(
       path.join(
         HOMEDIR,

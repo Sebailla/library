@@ -189,8 +189,18 @@ export interface SyncEngineDeps {
   watcher: Watcher
   /** Decoder / encoder for chokidar payloads. */
   decode(payload: unknown): SyncFile | null
-  /** Resolver chooses the winner between two SyncFiles. */
-  resolveConflict: (a: SyncFile, b: SyncFile) => MergeResult<SyncFile>
+  /**
+   * Resolver chooses the winner between two SyncFiles.
+   * Receives an options object so we can extend it with
+   * `localMtimeMs` / `remoteMtimeMs` later without
+   * breaking callers.
+   */
+  resolveConflict: (args: {
+    local: SyncFile
+    remote: SyncFile
+    localMtimeMs?: number | null
+    remoteMtimeMs?: number | null
+  }) => MergeResult<SyncFile>
 }
 
 /**

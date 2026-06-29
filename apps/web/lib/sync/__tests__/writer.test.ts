@@ -26,7 +26,7 @@
 
 import { describe, expect, it, beforeEach, vi } from 'vitest'
 
-import type { SyncFile, SyncFs } from '../types'
+import type { SyncFile, SyncFs, Note } from '../types'
 import { writeSyncFile } from '../writer'
 
 class MemoryFs implements SyncFs {
@@ -127,7 +127,7 @@ describe('sync/writer (PR-4B, #73)', () => {
     )
     const parsed = JSON.parse(
       fs.files.get('/tmp/alejandria/notes/b.json')!,
-    ) as SyncFile
+    ) as SyncFile & { payload: Note }
     expect(parsed.payload.text).toBe('v2')
     expect(parsed.updatedAt).toBe('2026-06-02T00:00:00.000Z')
   })
