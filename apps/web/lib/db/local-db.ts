@@ -61,6 +61,12 @@ export interface LocalDb {
   searchBooks(query: string): readonly BookRow[]
   insertProgress(bookId: string, currentPage: number, percentage: number): void
   getProgress(bookId: string): { currentPage: number; percentage: number } | null
+  /**
+   * Run a `PRAGMA` query against the underlying connection.
+   * Exposed so health probes (`/readyz`) can run
+   * `PRAGMA quick_check` without re-opening the DB.
+   */
+  pragma(key: string): unknown
   close(): void
 }
 
@@ -341,6 +347,10 @@ export function openLocalDb(): LocalDb {
         | undefined
       if (!row) return null
       return { currentPage: row.current_page, percentage: row.percentage }
+    },
+
+    pragma(key: string): unknown {
+      return handle.pragma(key)
     },
 
     close(): void {
