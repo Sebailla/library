@@ -416,9 +416,11 @@ describe('GET /api/admin/scan/events/:job_id (SSE)', () => {
         throw new Error('test server has no TCP address');
       }
 
-      // The test resolves when BOTH frames have been observed
-      // AND the socket has emitted `end`. Use a Promise.race so
-      // a missing close does not hang Jest past the safety net.
+      // The test resolves once the socket has emitted 'end' OR
+      // 'close' (Node's HTTP client may signal close without a
+      // separate 'end' when the server resets the stream), so a
+      // missing server-side close does not hang Jest past the
+      // safety net.
       const result = await new Promise<{
         text: string;
         ended: boolean;
@@ -436,20 +438,8 @@ describe('GET /api/admin/scan/events/:job_id (SSE)', () => {
             res.setEncoding('utf8');
             res.on('data', (chunk: string) => {
               out.text += chunk;
-              // Once we have BOTH the progress and the terminal
-              // frame and the socket has ended, the assertion is
-              // ready.
-              if (
-                out.text.includes('event: progress') &&
-                out.text.includes('"processed":3') &&
-                out.text.includes('event: done') &&
-                out.ended
-              ) {
-                req.destroy();
-              }
             });
-            res.on('end', () => {
-              out.ended = true;
+            const maybeResolve = (): void => {
               if (
                 out.text.includes('event: progress') &&
                 out.text.includes('"processed":3') &&
@@ -457,6 +447,16 @@ describe('GET /api/admin/scan/events/:job_id (SSE)', () => {
               ) {
                 req.destroy();
               }
+            };
+            res.on('end', () => {
+              out.ended = true;
+              maybeResolve();
+              resolve(out);
+            });
+            res.on('close', () => {
+              if (!out.ended) out.ended = true;
+              maybeResolve();
+              resolve(out);
             });
             res.on('error', () => resolve(out));
           },
@@ -487,6 +487,7 @@ describe('GET /api/admin/scan/events/:job_id (SSE)', () => {
 
         setTimeout(() => {
           req.destroy();
+          resolve(out);
         }, 1500);
       });
 

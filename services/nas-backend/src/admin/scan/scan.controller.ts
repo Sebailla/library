@@ -303,6 +303,10 @@ export class ScanController {
       res.write(`event: ${event.type}\n`);
       res.write(`data: ${JSON.stringify(event)}\n\n`);
     };
+    const isTerminal = (event: ScanProgressEvent): boolean =>
+      event.type === 'done' ||
+      event.type === 'cancelled' ||
+      event.type === 'failed';
 
     // If the job is already terminal, send the cached state once
     // and close. The bus has no replay so late subscribers would
@@ -330,8 +334,26 @@ export class ScanController {
       return;
     }
 
-    const unsub = this.bus.subscribe(jobId, writeEvent);
-    const heartbeat = setInterval(() => {
+    let unsub: (() => void) | null = null;
+    let heartbeat: NodeJS.Timeout | null = null;
+    const closeAll = (): void => {
+      if (heartbeat) clearInterval(heartbeat);
+      heartbeat = null;
+      if (unsub) unsub();
+      unsub = null;
+      res.end();
+    };
+    const onClose = (): void => closeAll();
+    res.on('close', onClose);
+
+    // Subscribe AFTER the close handler so a synchronous publish
+    // (which would otherwise fire before `unsub` is assigned) can
+    // still call `closeAll` safely.
+    unsub = this.bus.subscribe(jobId, (event) => {
+      writeEvent(event);
+      if (isTerminal(event)) closeAll();
+    });
+    heartbeat = setInterval(() => {
       // SSE comment line: ignored by EventSource clients but
       // flushes any buffer between the server and the proxy.
       res.write(':keepalive\n\n');
@@ -340,11 +362,5 @@ export class ScanController {
     // let it keep the Node event loop alive past the client
     // disconnect.
     heartbeat.unref?.();
-    const onClose = (): void => {
-      clearInterval(heartbeat);
-      unsub();
-      res.end();
-    };
-    res.on('close', onClose);
   }
 }
