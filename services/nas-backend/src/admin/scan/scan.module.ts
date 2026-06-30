@@ -4,7 +4,10 @@ import { Pool } from 'pg';
 import { AuthModule } from '../../auth/auth.module';
 import { DatabaseModule } from '../../database/database.module';
 import { PG_POOL } from '../../database/pg.service';
-import { BULLMQ_CONNECTION } from '../../workers/bullmq.config';
+import {
+  BULLMQ_CONNECTION,
+  getScanProducerDefaultJobOptions,
+} from '../../workers/bullmq.config';
 import { WorkersModule } from '../../workers/workers.module';
 import {
   BullMqScanJobProducer,
@@ -14,7 +17,11 @@ import {
   SCAN_QUEUE_NAME,
 } from './scan.service';
 import { ScanEventBus } from './scan-event-bus';
-import { ScanController } from './scan.controller';
+import {
+  ScanController,
+  SSE_HEARTBEAT_DEFAULT_MS,
+  SSE_HEARTBEAT_INTERVAL_MS,
+} from './scan.controller';
 import {
   SCAN_REPOSITORY,
   PgScanRepository,
@@ -62,6 +69,14 @@ import {
   controllers: [ScanController],
   providers: [
     ScanEventBus,
+    // Issue #100 — SSE heartbeat cadence. 25s is the production
+    // default; tests override the token via ``overrideProvider``
+    // to drive the interval down to ~50ms for a fast RED-GREEN
+    // cycle.
+    {
+      provide: SSE_HEARTBEAT_INTERVAL_MS,
+      useValue: SSE_HEARTBEAT_DEFAULT_MS,
+    },
     ScanService,
     {
       provide: SCAN_REPOSITORY,
@@ -94,12 +109,12 @@ import {
           SCAN_QUEUE_NAME,
           {
             connection: connection as never,
-            defaultJobOptions: {
-              attempts: 3,
-              backoff: { type: 'exponential', delay: 5000 },
-              removeOnComplete: { age: 3600, count: 1000 },
-              removeOnFail: { age: 86400 },
-            },
+            // Issue #98 — the producer and the worker share
+            // ``buildQueueOptions()`` (re-exported from
+            // ``workers.module.ts``) so a retry-budget change
+            // picks up both sides; no literal retry values are
+            // duplicated here.
+            defaultJobOptions: getScanProducerDefaultJobOptions(),
           },
         );
         return new BullMqScanJobProducer(queue);

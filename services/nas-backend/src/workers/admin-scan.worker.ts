@@ -2,7 +2,6 @@ import { Inject, Injectable, Logger } from '@nestjs/common';
 import { SCAN_REPOSITORY, ScanRepository } from '../admin/scan/scan.repository';
 import { ScanProgressEvent } from '../admin/scan/scan.types';
 import { ScanEventBus } from '../admin/scan/scan-event-bus';
-import { buildQueueOptions } from './workers.module';
 
 /**
  * Payload the admin scan producer enqueues. The worker re-reads
@@ -30,25 +29,13 @@ export type ProcessFileFn = (path: string) => Promise<unknown>;
  */
 export type DiscoverFilesFn = (jobId: string) => Promise<string[]>;
 
-/**
- * Re-export the queue defaults factory so the worker can reuse
- * the same retry budget the producer uses (attempts,
- * removeOnComplete, removeOnFail). BullMQ applies the same
- * options to the consumer-side ``Worker`` as to the producer-
- * side ``Queue``, so a single source of truth lives here.
- */
-export function buildAdminScanWorkerOptions(): {
-  attempts: number;
-  removeOnComplete: { age: number; count: number };
-  removeOnFail: { age: number };
-} {
-  const opts = buildQueueOptions();
-  return {
-    attempts: opts.attempts,
-    removeOnComplete: opts.removeOnComplete,
-    removeOnFail: opts.removeOnFail,
-  };
-}
+// NOTE: prior versions of this file re-exported
+// ``buildAdminScanWorkerOptions()`` — a thin pass-through over
+// ``buildQueueOptions()`` that was consumed only by the test
+// suite. Workers module reads retry values straight from
+// ``buildQueueOptions()`` (see ``workers.module.ts``), so the
+// wrapper duplicated the retry knobs without value. Removed in
+// issue #98.
 
 /**
  * Admin scan worker — PR-N4.

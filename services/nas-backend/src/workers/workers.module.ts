@@ -22,7 +22,22 @@ import {
   LIBRARIES_REPOSITORY,
   LibrariesRepository,
 } from '../libraries/libraries.repository';
-import { BULLMQ_CONNECTION, buildBullMqConnection } from './bullmq.config';
+import {
+  BULLMQ_CONNECTION,
+  buildBullMqConnection,
+  buildQueueOptions,
+} from './bullmq.config';
+// Re-exported for back-compat: callers (the test suite and
+// external consumers) historically imported ``buildQueueOptions``
+// and ``getScanProducerDefaultJobOptions`` from this module.
+// After issue #98 the canonical home is ``bullmq.config.ts``
+// (no module deps, breaks the ScanModule ↔ WorkersModule cycle
+// on the producer side); the re-export below keeps the old
+// import sites working unchanged.
+export {
+  buildQueueOptions,
+  getScanProducerDefaultJobOptions,
+} from './bullmq.config';
 import {
   DOWNLOADS_QUEUE_NAME,
   DownloadResumeJob,
@@ -32,7 +47,6 @@ import { ScanProcessor, SidecarError } from './scan.processor';
 import {
   AdminScanWorker,
   AdminScanJobPayload,
-  buildAdminScanWorkerOptions,
 } from './admin-scan.worker';
 import { instrumentAdminScanWorker } from '../observability/scan-instrumentation';
 import { METRICS_SERVICE, MetricsService } from '../observability/metrics.service';
@@ -83,42 +97,6 @@ async function walkLibrary(rootPath: string): Promise<string[]> {
 export interface ScanJobPayload {
   path: string;
   sha256_hint?: string;
-}
-
-/**
- * Shared BullMQ queue options (4R review #35).
- *
- *   - ``attempts: 3`` with exponential 5s backoff lets transient
- *     spawn failures (Redis blip, momentary CPU pressure) recover
- *     before the job is moved to the failed set.
- *   - ``removeOnComplete`` keeps the completed set bounded so a
- *     long-running queue does not grow unbounded; 1h of history is
- *     enough for operators to inspect recent runs.
- *   - ``removeOnFail`` keeps failed jobs for 24h so an operator
- *     has a full day to triage before BullMQ reaps them.
- *
- * The factory returns a plain object so the same options are
- * applied to both the ``scan`` and ``downloads`` workers AND the
- * (future) producer ``Queue.defaultJobOptions`` so callers that
- * call ``queue.add(...)`` without explicit options still pick up
- * the same retry budget.
- *
- * The values are exposed as a free function (not a constant) so
- * tests can assert against the same object the wiring uses
- * without reaching into module internals.
- */
-export function buildQueueOptions(): {
-  attempts: number;
-  backoff: { type: 'exponential'; delay: number };
-  removeOnComplete: { age: number; count: number };
-  removeOnFail: { age: number };
-} {
-  return {
-    attempts: 3,
-    backoff: { type: 'exponential', delay: 5000 },
-    removeOnComplete: { age: 3600, count: 1000 },
-    removeOnFail: { age: 86400 },
-  };
 }
 
 /**

@@ -25,6 +25,11 @@ import type {
  *     further updates) from "download finished".
  *   - ``downloads_total{state="completed"}``  — when
  *     ``updateDownload`` flips ``completed = true``.
+ *   - ``downloads_total{state="failed"}``  — ``createDownload`` or
+ *     ``updateDownload`` throws (issue #99). The counter is the only
+ *     way operators can see the actual download failure rate;
+ *     without it the series is permanently zero and Grafana panels
+ *     cannot alarm on download regressions.
  *   - ``download_bytes{state="in_progress"|state="completed"}`` —
  *     each PATCH observes the running byte total so the
  *     histogram also captures in-flight download sizes.
@@ -141,6 +146,41 @@ describe('InstrumentedDownloadsService (PR-N7)', () => {
     ]);
     await inst.updateDownload(9, { completed: true, bytesTransferred: 2048, requestingDeviceId: 'd' });
     expect(inner.calls).toHaveLength(2);
+  });
+
+  it('records downloads_total{state="failed"} when createDownload throws (issue #99)', async () => {
+    const metrics = new MetricsService();
+    await metrics.onApplicationBootstrap();
+    const inner = {
+      async createDownload(): Promise<never> {
+        throw new Error('create blew up');
+      },
+    } as unknown as DownloadsService;
+    const inst = instrumentDownloadsService(inner, metrics);
+    await expect(
+      inst.createDownload({ bookId: 1, deviceId: null, ipAddress: '127.0.0.1', userAgent: 't' }),
+    ).rejects.toThrow('create blew up');
+    const text = await metrics.render();
+    expect(textHits(text, /downloads_total\{state="failed"\} (\d+)/)).toBe(1);
+    // The 'started' counter has already been bumped before the throw;
+    // we keep it so dashboards keep showing "intents".
+    expect(textHits(text, /downloads_total\{state="started"\} (\d+)/)).toBe(1);
+  });
+
+  it('records downloads_total{state="failed"} when updateDownload throws (issue #99)', async () => {
+    const metrics = new MetricsService();
+    await metrics.onApplicationBootstrap();
+    const inner = {
+      async updateDownload(): Promise<never> {
+        throw new Error('update blew up');
+      },
+    } as unknown as DownloadsService;
+    const inst = instrumentDownloadsService(inner, metrics);
+    await expect(
+      inst.updateDownload(1, { completed: true, bytesTransferred: 2048, requestingDeviceId: 'd' }),
+    ).rejects.toThrow('update blew up');
+    const text = await metrics.render();
+    expect(textHits(text, /downloads_total\{state="failed"\} (\d+)/)).toBe(1);
   });
 
   it('exposes METRICS_SERVICE as the canonical DI token (caller does not need the class literal)', () => {
