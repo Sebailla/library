@@ -1,6 +1,16 @@
 import { Controller, Get, UseGuards } from '@nestjs/common';
+import {
+  ApiBearerAuth,
+  ApiOkResponse,
+  ApiOperation,
+  ApiTags,
+} from '@nestjs/swagger';
 import { DiscoveryService } from './discovery.service';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
+import {
+  ApiUnauthorizedResponse,
+  ApiForbiddenResponse,
+} from '../common/openapi.decorators';
 
 /**
  * Body shape returned by the pre-auth ``GET /api/discovery/info``
@@ -49,6 +59,7 @@ export interface DiscoveryNetwork {
  * must not be able to enumerate the NAS network surface just
  * because they can reach mDNS.
  */
+@ApiTags('discovery')
 @Controller({ path: 'api/discovery', version: undefined })
 export class DiscoveryController {
   constructor(private readonly discoveryService: DiscoveryService) {}
@@ -58,6 +69,20 @@ export class DiscoveryController {
    * HTTP port — never the IP surface.
    */
   @Get('info')
+  @ApiOperation({
+    summary: 'Pre-auth discovery handshake',
+    description:
+      'Returns the mDNS service name and HTTP port so a brand-new client can locate the NAS BEFORE pairing. Deliberately omits the IP surface — see `GET /api/discovery/network` for that (auth-required).',
+  })
+  @ApiOkResponse({
+    description: 'Discovery handshake',
+    schema: {
+      example: {
+        mdns_name: 'alejandria-nas._alejandria._tcp.local',
+        port: 3000,
+      },
+    },
+  })
   async info(): Promise<DiscoveryInfo> {
     const full = await this.discoveryService.getFull();
     return {
@@ -73,6 +98,23 @@ export class DiscoveryController {
    */
   @Get('network')
   @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth('bearer')
+  @ApiOperation({
+    summary: 'Auth-required network view (Tailscale IP + LAN list)',
+    description:
+      'Reveals the Tailscale IPv4 (or `null` when Tailscale is down) and the host LAN IPv4 list. Bearer token required — a paired device can read this after `POST /api/auth/pair`.',
+  })
+  @ApiOkResponse({
+    description: 'Network surface for the NAS host',
+    schema: {
+      example: {
+        tailscale_ip: '100.64.1.5',
+        lan_ips: ['192.168.1.42'],
+      },
+    },
+  })
+  @ApiUnauthorizedResponse()
+  @ApiForbiddenResponse()
   async network(): Promise<DiscoveryNetwork> {
     const full = await this.discoveryService.getFull();
     return {
