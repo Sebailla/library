@@ -13,6 +13,7 @@ import {
   SCAN_REPOSITORY,
   ScanRepository,
 } from '../../../src/admin/scan/scan.repository';
+import { SCAN_JOB_PRODUCER } from '../../../src/admin/scan/scan.service';
 import { Library, NewLibrary } from '../../../src/libraries/libraries.types';
 import {
   NewScanJob,
@@ -256,17 +257,16 @@ async function buildApp(opts: {
     .useValue(new InMemoryBookCount())
     .overrideProvider(SCAN_REPOSITORY)
     .useValue(scanRepo)
+    .overrideProvider(SCAN_JOB_PRODUCER)
+    .useValue({
+      add: (data: { jobId: string }) => producer.add('scan', data),
+      close: () => producer.close(),
+    })
     // The controller wires a ScanService which needs a producer.
     // We override the BULLMQ_CONNECTION provider to null so the
     // WorkersBootstrap short-circuits, then wire a stub producer
     // through the SCAN_JOB_PRODUCER token below.
     .compile();
-  // Wire the producer through a Nest provider override too.
-  // The producer is exposed by ScanModule via the SCAN_JOB_PRODUCER
-  // token; if the module has not yet added that token (current
-  // apply step), the buildApp helper will surface a missing
-  // provider error and we will know to update the module.
-  await moduleRef.init();
   const app = moduleRef.createNestApplication();
   app.useGlobalPipes(buildValidationPipe());
   await app.init();
