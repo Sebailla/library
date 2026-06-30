@@ -111,6 +111,51 @@ The `hardenedRuntime: true` flag in `electron-builder.yml`
 turns on the macOS Hardened Runtime, which notarisation
 *requires*. Don't disable it.
 
+### PR-N8: blocking notarize via `xcrun notarytool submit --wait`
+
+The end-to-end pipeline is exposed as a single shell script
+(`apps/mac/scripts/sign-and-notarize.sh`) so CI never has to
+remember the env var + tool ordering. Invoke it from the
+`apps/mac/` directory:
+
+```sh
+cd apps/mac
+APPLE_ID='you@example.com' \
+APPLE_APP_SPECIFIC_PASSWORD='abcd-efgh-ijkl-mnop' \
+APPLE_TEAM_ID='ABCDE12345' \
+CSC_LINK=/path/to/DeveloperID.p12 \
+CSC_KEY_PASSWORD='…' \
+  npm run dist:mac:sign
+```
+
+The script refuses to run if any of `APPLE_ID`,
+`APPLE_APP_SPECIFIC_PASSWORD`, `APPLE_TEAM_ID`, or `CSC_LINK`
+are missing (each guard exits with `1`). Once the env is
+sane, it does:
+
+1. `npm run build` — compile the main process bundle.
+2. `npm run package` — wrap the bundle into a `.app` via
+   electron-forge.
+3. `electron-builder --mac --publish never` — codesign the
+   .app, build the DMG, hand it to electron-builder's
+   notarization hook.
+4. `xcrun notarytool submit … --wait` — BLOCK on Apple's
+   notary service so the script only returns 0 after the
+   ticket has been issued. The `--wait` flag is non-optional:
+   without it the script can fire-and-forget a DMG whose
+   ticket never arrives (PR-4D postmortem).
+
+The script honours `ELECTRON_BUILDER_CACHE` so the runner
+can keep the multi-GB electron download between invocations.
+
+### Mocked Apple ID in tests
+
+`apps/mac/__tests__/sign-and-notarize.test.ts` asserts the
+script statically (guards present, `--wait` flag present,
+electron-builder + `--publish never` pair present). No real
+Apple ID is required — these are content checks, not a
+codesign attempt.
+
 ## Auto-update flow (`electron-updater`)
 
 `apps/mac/electron-builder.yml` declares the publish target:
