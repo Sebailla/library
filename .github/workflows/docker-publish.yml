@@ -88,6 +88,15 @@ jobs:
           echo "tags=${TAGS}" >> "${GITHUB_OUTPUT}"
           echo "Resolved tags: ${TAGS}"
 
+      - name: resolve build date
+        id: build_date
+        run: |
+          set -euo pipefail
+          # Build timestamp in RFC 3339 / ISO 8601 form. The runner's
+          # local clock is good enough for an OCI annotation — it does
+          # not need to match the commit's authored date.
+          echo "date=$(date -u +%FT%TZ)" >> "${GITHUB_OUTPUT}"
+
       - name: build and push
         uses: docker/build-push-action@v5
         with:
@@ -99,6 +108,7 @@ jobs:
           build-args: |
             VERSION=${{ steps.version.outputs.version }}
             VCS_REF=${{ github.sha }}
+            BUILD_DATE=${{ steps.build_date.outputs.date }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           provenance: false
