@@ -12,6 +12,19 @@ import {
   Req,
   UseGuards,
 } from '@nestjs/common';
+import {
+  ApiBearerAuth,
+  ApiBody,
+  ApiConflictResponse,
+  ApiCreatedResponse,
+  ApiForbiddenResponse,
+  ApiNoContentResponse,
+  ApiNotFoundResponse,
+  ApiOkResponse,
+  ApiOperation,
+  ApiTags,
+  ApiUnauthorizedResponse,
+} from '@nestjs/swagger';
 import { IsOptional, IsString, MaxLength, MinLength } from 'class-validator';
 import { JwtAuthGuard, JwtAuthRequest } from '../auth/jwt-auth.guard';
 import {
@@ -21,6 +34,7 @@ import {
   toLibraryDto,
   UpdateLibraryInput,
 } from './libraries.service';
+import { ApiValidationResponse } from '../common/openapi.decorators';
 
 /**
  * Body for ``POST /api/libraries``. Snake-case to match the
@@ -76,17 +90,43 @@ class UpdateLibraryBody {
  * transport adapter that converts wire bodies to the service
  * DTOs and back.
  */
+@ApiTags('libraries')
+@ApiBearerAuth('bearer')
 @Controller({ path: 'api/libraries', version: undefined })
 @UseGuards(JwtAuthGuard)
 export class LibrariesController {
   constructor(private readonly librariesService: LibrariesService) {}
 
   @Get()
+  @ApiOperation({
+    summary: 'List all libraries',
+    description:
+      'Returns every library the device-pair knows about. Bearer required.',
+  })
+  @ApiOkResponse({ description: 'List of libraries' })
+  @ApiUnauthorizedResponse()
   list(): Promise<LibraryDto[]> {
     return this.librariesService.list().then((rows) => rows.map(toLibraryDto));
   }
 
   @Post()
+  @ApiOperation({
+    summary: 'Create a new library',
+    description:
+      'Registers a folder as a library rooted at `root_path`. The paired device becomes the library creator (used for PATCH/DELETE authorisation).',
+  })
+  @ApiBody({
+    description: 'Library fields',
+    schema: {
+      example: {
+        name: 'Seba’s reference library',
+        root_path: '/Volumes/NAS/books',
+      },
+    },
+  })
+  @ApiCreatedResponse({ description: 'Library created' })
+  @ApiUnauthorizedResponse()
+  @ApiValidationResponse()
   async create(
     @Req() req: JwtAuthRequest,
     @Body() body: CreateLibraryBody,
@@ -101,6 +141,10 @@ export class LibrariesController {
   }
 
   @Get(':id')
+  @ApiOperation({ summary: 'Get a library by id' })
+  @ApiOkResponse({ description: 'Library detail' })
+  @ApiUnauthorizedResponse()
+  @ApiNotFoundResponse()
   async detail(
     @Param('id', ParseIntPipe) id: number,
   ): Promise<LibraryDto> {
@@ -109,6 +153,25 @@ export class LibrariesController {
   }
 
   @Patch(':id')
+  @ApiOperation({
+    summary: 'Update library fields (creator-only)',
+    description:
+      'Updates one or both of `name` / `root_path`. Only the creator can PATCH; non-creators get 403.',
+  })
+  @ApiBody({
+    description: 'Partial update — both fields are optional',
+    schema: {
+      example: {
+        name: 'Seba’s reference library (renamed)',
+        root_path: '/Volumes/NAS/books',
+      },
+    },
+  })
+  @ApiOkResponse({ description: 'Library updated' })
+  @ApiUnauthorizedResponse()
+  @ApiForbiddenResponse()
+  @ApiNotFoundResponse()
+  @ApiValidationResponse()
   async update(
     @Req() req: JwtAuthRequest,
     @Param('id', ParseIntPipe) id: number,
@@ -125,6 +188,16 @@ export class LibrariesController {
 
   @Delete(':id')
   @HttpCode(204)
+  @ApiOperation({
+    summary: 'Delete a library (creator-only, must be empty)',
+    description:
+      'Only the creator can DELETE. The library must be empty of indexed books — otherwise the service throws 409 LIBRARY_NOT_EMPTY.',
+  })
+  @ApiNoContentResponse({ description: 'Library deleted' })
+  @ApiUnauthorizedResponse()
+  @ApiForbiddenResponse()
+  @ApiNotFoundResponse()
+  @ApiConflictResponse()
   async delete(
     @Req() req: JwtAuthRequest,
     @Param('id', ParseIntPipe) id: number,
@@ -134,6 +207,14 @@ export class LibrariesController {
   }
 
   @Put(':id/active')
+  @ApiOperation({
+    summary: 'Activate a library for the paired device',
+    description:
+      'Marks the library as the device’s active one. Used for per-device "current library" state.',
+  })
+  @ApiOkResponse({ description: 'Active library set' })
+  @ApiUnauthorizedResponse()
+  @ApiNotFoundResponse()
   async setActive(
     @Req() req: JwtAuthRequest,
     @Param('id', ParseIntPipe) id: number,
