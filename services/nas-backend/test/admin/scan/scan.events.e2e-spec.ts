@@ -375,4 +375,126 @@ describe('GET /api/admin/scan/events/:job_id (SSE)', () => {
       await app.close();
     }
   });
+
+  /**
+   * Issue #100: the SSE stream must serve the live progress
+   * channel AND close itself when the worker delivers a
+   * terminal event. Concretely:
+   *
+   *   1. Client opens the SSE connection against a running job.
+   *   2. Worker (or test fixture) publishes a `progress` event.
+   *   3. Server writes the corresponding `event: progress\ndata:
+   *      <json>\n\n` frame on the wire.
+   *   4. Worker delivers the terminal `done` event.
+   *   5. Server writes the matching frame and closes the
+   *      response — the client observes an `end` on the
+   *      underlying socket.
+   *
+   * Step 5 is the actual gap (the controller docstring claims
+   * it, but the implementation only closes on `res.on('close')`
+   * or via the already-terminal replay path).
+   */
+  it('delivers a live progress frame and closes on a terminal event', async () => {
+    const scanRepo = new InMemoryScanRepository();
+    await scanRepo.insertJob({
+      id: 'dddddddd-dddd-dddd-dddd-dddddddddddd',
+      libraryId: null,
+      kind: 'full',
+    });
+    await scanRepo.setJobStatus('dddddddd-dddd-dddd-dddd-dddddddddddd', 'running');
+    const { app } = await buildApp({
+      scanRepo,
+      heartbeatIntervalMs: 60_000, // disable heartbeat noise in this test
+    });
+    try {
+      const token = await pairAndGetToken(app);
+      const bus = app.get(ScanEventBus);
+      await app.listen(0);
+      const server = app.getHttpServer() as Server;
+      const address = server.address();
+      if (!address || typeof address === 'string') {
+        throw new Error('test server has no TCP address');
+      }
+
+      // The test resolves when BOTH frames have been observed
+      // AND the socket has emitted `end`. Use a Promise.race so
+      // a missing close does not hang Jest past the safety net.
+      const result = await new Promise<{
+        text: string;
+        ended: boolean;
+      }>((resolve) => {
+        const out = { text: '', ended: false };
+        const req = http.request(
+          {
+            host: '127.0.0.1',
+            port: address.port,
+            path: '/api/admin/scan/events/dddddddd-dddd-dddd-dddd-dddddddddddd',
+            method: 'GET',
+            headers: { Authorization: `Bearer ${token}` },
+          },
+          (res) => {
+            res.setEncoding('utf8');
+            res.on('data', (chunk: string) => {
+              out.text += chunk;
+              // Once we have BOTH the progress and the terminal
+              // frame and the socket has ended, the assertion is
+              // ready.
+              if (
+                out.text.includes('event: progress') &&
+                out.text.includes('"processed":3') &&
+                out.text.includes('event: done') &&
+                out.ended
+              ) {
+                req.destroy();
+              }
+            });
+            res.on('end', () => {
+              out.ended = true;
+              if (
+                out.text.includes('event: progress') &&
+                out.text.includes('"processed":3') &&
+                out.text.includes('event: done')
+              ) {
+                req.destroy();
+              }
+            });
+            res.on('error', () => resolve(out));
+          },
+        );
+        req.on('error', () => resolve(out));
+        req.end();
+
+        // Hand the test fixture a hook to publish events once
+        // the SSE subscription is in place. The 80ms delay is
+        // enough for the controller's `bus.subscribe(...)` call
+        // to have registered before we start emitting.
+        setTimeout(() => {
+          bus.publish('dddddddd-dddd-dddd-dddd-dddddddddddd', {
+            jobId: 'dddddddd-dddd-dddd-dddd-dddddddddddd',
+            type: 'progress',
+            processed: 3,
+            total: 10,
+            timestamp: '2026-06-30T12:00:00Z',
+          });
+          bus.publish('dddddddd-dddd-dddd-dddd-dddddddddddd', {
+            jobId: 'dddddddd-dddd-dddd-dddd-dddddddddddd',
+            type: 'done',
+            processed: 10,
+            total: 10,
+            timestamp: '2026-06-30T12:00:01Z',
+          });
+        }, 80);
+
+        setTimeout(() => {
+          req.destroy();
+        }, 1500);
+      });
+
+      expect(result.text).toMatch(/event: progress\ndata: \{[^}]*"processed":3/);
+      expect(result.text).toMatch(/event: done\ndata: \{[^}]*"processed":10/);
+      expect(result.ended).toBe(true);
+    } finally {
+      await app.close();
+    }
+  });
 });
