@@ -18,6 +18,7 @@ import {
 import { DOWNLOADS_REPOSITORY } from '../../src/downloads/downloads.repository';
 import { BULLMQ_CONNECTION } from '../../src/workers/bullmq.config';
 import IORedis from 'ioredis';
+import { MetricsService } from '../../src/observability/metrics.service';
 
 /**
  * Contract tests for {@link WorkersBootstrap} (PR-2E, work unit 2).
@@ -122,6 +123,12 @@ describe('WorkersBootstrap', () => {
       // ``ScanEventBus`` constructor takes no args.
       new (require('../../src/admin/scan/scan-event-bus').ScanEventBus)(),
       new StubLibrariesRepository() as never,
+      // PR-N7 — MetricsService for instrumentation. The bootstrap
+      // is responsible for firing scan_jobs_total via the
+      // instrumented worker; pass a real instance with the
+      // registry created by onApplicationBootstrap() so the test
+      // exercises the same code path as production.
+      new MetricsService(),
     );
     await bootstrap.onModuleInit();
     // No exceptions, no workers started. Closing the bootstrap
@@ -148,6 +155,7 @@ describe('WorkersBootstrap', () => {
       new StubScanRepository() as never,
       new (require('../../src/admin/scan/scan-event-bus').ScanEventBus)(),
       new StubLibrariesRepository() as never,
+      new MetricsService(),
     );
     // The probe caps the wait at 750ms; we extend the Jest
     // timeout slightly to absorb DNS / handshake overhead.

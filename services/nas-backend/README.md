@@ -943,8 +943,33 @@ pgroonga instance.
 The auth module issues a per-device bearer token after a one-time
 PIN pairing. Every endpoint other than `GET /health`,
 `GET /livez`, `GET /readyz`, `GET /api/discovery/info`,
-`POST /api/auth/pair`, and `POST /api/auth/refresh` requires a
-valid `Authorization: Bearer <jwt>` header.
+`GET /metrics`, `POST /api/auth/pair`, and `POST /api/auth/refresh`
+requires a valid `Authorization: Bearer <jwt>` header.
+
+## Observability (PR-N7, issue #92)
+
+The `ObservabilityModule` exposes a Prometheus-compatible metrics
+endpoint at `GET /metrics`. The endpoint is intentionally
+unauthenticated so scrapers (Prometheus, Grafana Agent, etc.) can
+poll without managing a bearer token; operators who want to lock
+it down must front it with a network-level ACL (firewall or
+Tailscale ACL).
+
+Exposed metrics:
+
+```
+http_requests_total{method,path,status}            counter
+http_request_duration_seconds                      histogram
+scan_jobs_total{status}                            counter
+scan_job_duration_seconds                          histogram
+downloads_total{state}                             counter
+download_bytes                                     histogram
+```
+
+`request_id` propagation: the global request middleware honours
+an inbound `X-Request-Id` header (or mints a UUID v4) and seeds
+an `AsyncLocalStorage` so every Pino log line emitted during the
+request carries `{request_id, route, method}`.
 
 ### Endpoints
 

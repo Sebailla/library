@@ -14,6 +14,7 @@ import { DiscoveryModule } from './discovery/discovery.module';
 import { FilesModule } from './files/files.module';
 import { LibrariesModule } from './libraries/libraries.module';
 import { ScanModule } from './admin/scan/scan.module';
+import { ObservabilityModule } from './observability/observability.module';
 import { OrganizeModule } from './admin/organize/organize.module';
 
 /**
@@ -86,6 +87,13 @@ class ThrottlerExceptionFilter implements ExceptionFilter {
  * by ``JwtAuthGuard`` + ``ScanAdminGuard`` so only paired devices
  * with ``is_admin = true`` (migration 015) can trigger a scan.
  *
+ * PR-N7 adds the ``ObservabilityModule`` which exposes
+ * ``GET /metrics`` (Prometheus exposition format with HTTP,
+ * scan, and download counters + histograms) and registers the
+ * ``MetricsService`` singleton used by the request middleware
+ * mounted in ``main.ts`` and by the scan / downloads business
+ * code paths.
+ *
  * PR-N5 adds the ``OrganizeModule`` which exposes the
  * ``/api/admin/organize/*`` HTTP surface — admin-only analyze
  * (proposed paths for a folder) and execute (idempotent
@@ -128,6 +136,7 @@ class ThrottlerExceptionFilter implements ExceptionFilter {
     FilesModule,
     LibrariesModule,
     ScanModule,
+    ObservabilityModule,
     OrganizeModule,
   ],
   providers: [
