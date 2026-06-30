@@ -30,6 +30,11 @@ NestJS application that backs the **alejandria-v2** NAS catalog.
 >   `HEAD /api/files/:id` for resumable downloads)
 > - **PR-N2** — `LibrariesModule` (`/api/libraries/*` CRUD + per-device
 >   active library, `books.library_id` scoping on the catalog queries)
+> - **PR-N3** — Download tracking enhancements: `devices.is_admin`
+>   (migration 015) + admin gate on `/api/downloads/stats` and
+>   `/api/downloads/by-book/:book_id` (403 `ADMIN_REQUIRED`), plus
+>   `GET /api/me/downloads` (caller-scoped) and the privacy check
+>   on `/api/downloads/by-device/:device_id` (path-vs-bearer match).
 
 ## Stack
 
@@ -58,9 +63,9 @@ services/nas-backend/
 │   │   ├── jwt.strategy.ts    # passport-jwt strategy
 │   │   ├── jwt-auth.guard.ts  # Bearer-token guard
 │   │   └── devices.repository.ts
-│   ├── me/                    # PR-2C — sample protected route
+│   ├── me/                    # PR-2C + PR-N3 — caller-scoped routes
 │   │   ├── me.module.ts
-│   │   └── me.controller.ts   # GET /api/me
+│   │   └── me.controller.ts   # GET /api/me, GET /api/me/downloads (PR-N3)
 │   ├── files/                 # PR-N1 — Range-aware file streaming
 │   │   ├── files.module.ts    # wires FilesService + LIBRARY_ROOT token
 │   │   ├── files.controller.ts # GET/HEAD /api/files/:book_id
@@ -276,15 +281,27 @@ HTTP layer and the Python sidecar.
 ```
 POST   /api/downloads                { book_id, device_id?, device_name?, user_id?, file_size_bytes? }
                                     → 201 { download_id, resume_supported }
+                                    (admin: not required)
 
 PATCH  /api/downloads/:id            { completed?, bytes_transferred }
                                     → 200 { id, completed, bytes_transferred, book_id, device_id, downloaded_at }
+                                    (admin: not required)
 
 GET    /api/downloads/stats
                                     → 200 { total, completed, top_books: [...], top_devices: [...] }
+                                    (admin: REQUIRED)
+
+GET    /api/downloads/by-book/:book_id
+                                    → 200 { book_id, top_devices: [{device_id, device_name, count, last_downloaded_at}] }
+                                    (admin: REQUIRED)
 
 GET    /api/downloads/by-device/:device_id
                                     → 200 { data: Download[] }
+                                    (admin: not required; privacy check — path param MUST match bearer)
+
+GET    /api/me/downloads            (PR-N3)
+                                    → 200 { data: Download[] }
+                                    (admin: not required; caller-scoped via JWT)
 ```
 
 `POST /api/downloads` is **idempotent**: if a `(book_id, device_id)`
@@ -297,6 +314,41 @@ counts do not get clobbered by a reconnect).
 All four endpoints sit behind `JwtAuthGuard`. The repository token
 (`DOWNLOADS_REPOSITORY`) is exposed as a string so e2e tests stub
 it with an in-memory implementation.
+
+#### Admin gate (PR-N3)
+
+`GET /api/downloads/stats` and `GET /api/downloads/by-book/:book_id`
+require `device.is_admin = true` (migration 015). A non-admin
+bearer gets:
+
+```json
+403 { "error": { "code": "ADMIN_REQUIRED", "message": "admin role required" } }
+```
+
+The check fires on identity resolution: every request reads
+`req.device.deviceId` from the `JwtAuthGuard`, looks up the row in
+`DevicesRepository.isAdmin`, and refuses with the same envelope on
+mismatch. The other endpoints (POST, PATCH, `/by-device/:id`,
+`/me/downloads`) are open to every paired device; the privacy
+check on `/by-device/:id` is the bearer-vs-path-param comparison
+4R #42 introduced, and `/me/downloads` resolves `device_id`
+server-side exclusively.
+
+#### Privacy boundary (PR-N3)
+
+`GET /api/downloads/by-device/:device_id` enforces that the path
+param equals the bearer's `deviceId` — otherwise:
+
+```json
+403 { "error": { "code": "FORBIDDEN", "message": "Bearer device does not match path param" } }
+```
+
+`GET /api/me/downloads` is the caller-scoped alternative: there
+is no client-controlled identifier on the wire, so a paired but
+unprivileged device cannot ask for another device's history by
+passing a different `device_id`. The repository method
+`listForDevice` is the privacy boundary; the controller does not
+trust any user input beyond the JWT-derived identity.
 
 ### Workers (BullMQ + sidecar)
 
@@ -660,6 +712,7 @@ Files shipped in PR-2B + PR-2C + PR-N2:
 | `012_libraries.sql` | `libraries` table — BIGSERIAL id + name + root_path + created_by_device_id (UUID NULL) + created_at |
 | `013_device_libraries.sql` | `device_libraries` join — composite PK + ON DELETE CASCADE + partial index on `(device_id, active)` |
 | `014_books_library_id.sql` | `books.library_id` (nullable FK to libraries) + B-tree index |
+| `015_devices_is_admin.sql` | `devices.is_admin BOOLEAN DEFAULT FALSE NOT NULL` — admin gate for `/api/downloads/stats` + `/api/downloads/by-book/:book_id` (PR-N3) |
 
 ### pgroonga ops runbook (4R review #43)
 
@@ -763,8 +816,8 @@ pgroonga instance.
 | `BooksRepository` | `insert`, `findById`, `listByAuthor`, `list` (+filters incl. `libraryId`), `count`, `search`, `countByLibrary` |
 | `CategoriesRepository` | `insert`, `findByPath`, `listChildren`, `listRoots`, `listForBook`, `findSubtree` (recursive CTE) |
 | `SagasRepository` | `insert`, `attachBook` (idempotent), `listByAuthor`, `listForBook`, `listBooksInSaga` |
-| `DownloadsRepository` | `insert`, `markCompleted`, `updateProgress`, `listByDevice`, `findById`, `findCompletedForDeviceAndBook`, `stats` |
-| `DevicesRepository` | `insert`, `findByDeviceId`, `updateTokenHash`, `touch` |
+| `DownloadsRepository` | `insert`, `markCompleted`, `updateProgress`, `listByDevice`, `listForDevice` (PR-N3), `findById`, `findByBookId` (PR-N3), `findCompletedForDeviceAndBook`, `topDevicesForBook` (PR-N3), `stats` |
+| `DevicesRepository` | `insert`, `findByDeviceId`, `updateTokenHash`, `touch`, `isAdmin` (PR-N3) |
 | `LibrariesRepository` | `list`, `findById`, `insert`, `update`, `delete`, `setActiveForDevice`, `getActiveForDevice`, `listForDevice` |
 | `SearchRepository` | `search` (pgroonga `&@~` + `pgroonga.score(tableoid)`) |
 

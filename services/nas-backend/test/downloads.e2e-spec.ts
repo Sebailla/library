@@ -102,6 +102,17 @@ class InMemoryDevicesRepository {
     if (row) row.lastSeenAt = new Date();
   }
 
+  /**
+   * PR-N3 — admin gate helper. The default ``false`` matches the
+   * migration's ``DEFAULT FALSE`` so every existing test that does
+   * NOT explicitly opt into admin continues to behave like a
+   * non-admin client. The downloads admin tests inject their own
+   * stub via ``useValue`` to flip the flag.
+   */
+  async isAdmin(deviceId: string): Promise<boolean> {
+    return false;
+  }
+
   async close(): Promise<void> {}
 }
 
@@ -236,6 +247,35 @@ class InMemoryDownloadsRepository {
       .slice(0, limit);
   }
 
+  /**
+   * PR-N3 — caller-scoped list. Today the contract is identical
+   * to ``listByDevice``; the methods are kept distinct so a future
+   * divergence (e.g. an extra ``completed`` filter on
+   * ``/api/me/downloads``) does not silently affect the
+   * path-param-driven route.
+   */
+  async listForDevice(
+    deviceId: string,
+    opts: { limit?: number } = {},
+  ): Promise<InMemoryDownloadRow[]> {
+    return this.listByDevice(deviceId, opts);
+  }
+
+  /**
+   * PR-N3 — every download for a given book, newest first.
+   * Backed by the in-memory row store.
+   */
+  async findByBookId(
+    bookId: number,
+    opts: { limit?: number } = {},
+  ): Promise<InMemoryDownloadRow[]> {
+    const limit = opts.limit ?? 100;
+    const filtered = this.rows.filter((r) => r.bookId === bookId);
+    return filtered
+      .sort((a, b) => b.downloadedAt.getTime() - a.downloadedAt.getTime())
+      .slice(0, limit);
+  }
+
   async findById(id: number): Promise<InMemoryDownloadRow | null> {
     return this.rows.find((r) => r.id === id) ?? null;
   }
@@ -275,6 +315,66 @@ class InMemoryDownloadsRepository {
       .map(([device_id, count]) => ({ device_id, count }))
       .sort((a, b) => b.count - a.count);
     return { total, completed, top_books, top_devices };
+  }
+
+  /**
+   * PR-N3 — in-memory mirror of the production
+   * ``topDevicesForBook`` contract. Mirrors the SQL semantics:
+   * group by ``device_id``, exclude rows with ``device_id IS NULL``,
+   * order by count DESC then ``device_id`` ASC.
+   */
+  async topDevicesForBook(
+    bookId: number,
+    limit: number,
+  ): Promise<
+    Array<{
+      deviceId: string;
+      deviceName: string | null;
+      count: number;
+      lastDownloadedAt: Date;
+    }>
+  > {
+    const groups = new Map<
+      string,
+      {
+        deviceName: string | null;
+        count: number;
+        lastDownloadedAt: Date;
+      }
+    >();
+    for (const row of this.rows) {
+      if (row.bookId !== bookId || row.deviceId === null) continue;
+      const existing = groups.get(row.deviceId);
+      if (existing) {
+        existing.count += 1;
+        if (row.downloadedAt > existing.lastDownloadedAt) {
+          existing.lastDownloadedAt = row.downloadedAt;
+        }
+        // Take the most recently-set device_name; if any of the
+        // matching rows carries a non-null name, surface it.
+        if (existing.deviceName === null && row.deviceName !== null) {
+          existing.deviceName = row.deviceName;
+        }
+      } else {
+        groups.set(row.deviceId, {
+          deviceName: row.deviceName,
+          count: 1,
+          lastDownloadedAt: row.downloadedAt,
+        });
+      }
+    }
+    return [...groups.entries()]
+      .map(([deviceId, value]) => ({
+        deviceId,
+        deviceName: value.deviceName,
+        count: value.count,
+        lastDownloadedAt: value.lastDownloadedAt,
+      }))
+      .sort((a, b) => {
+        if (b.count !== a.count) return b.count - a.count;
+        return a.deviceId.localeCompare(b.deviceId);
+      })
+      .slice(0, limit);
   }
 
   async close(): Promise<void> {}
@@ -318,6 +418,62 @@ async function buildApp(opts: {
   app.useGlobalPipes(buildValidationPipe());
   await app.init();
   return { app, downloads, books };
+}
+
+/**
+ * PR-N3 — build an app where a paired device can be promoted to
+ * admin AFTER pairing. The default ``InMemoryDevicesRepository``
+ * returns ``false`` for ``isAdmin`` (matching the migration's
+ * default), so most tests stay non-admin. The two tests that
+ * exercise the admin gate opt in via ``promoteToAdmin``.
+ */
+async function buildAppWithAdminFlag(): Promise<{
+  app: INestApplication;
+  downloads: InMemoryDownloadsRepository;
+  books: InMemoryBooksRepository;
+  promoteToAdmin: (deviceId: string) => void;
+}> {
+  setEnv({
+    NAS_PAIR_PIN: '12345678',
+    NAS_PIN_TTL_DAYS: '30',
+    NAS_JWT_SECRET: 'test-secret-do-not-use-in-prod-must-be-32+bytes',
+    NAS_JWT_TTL_HOURS: '24',
+  });
+  const devices = new InMemoryDevicesRepository();
+  const adminSet = new Set<string>();
+  (devices as unknown as {
+    isAdmin: (id: string) => Promise<boolean>;
+  }).isAdmin = async (id: string) => adminSet.has(id);
+
+  const books = new InMemoryBooksRepository();
+  const categories = new InMemoryCategoriesRepository();
+  const sagas = new InMemorySagasRepository();
+  const downloads = new InMemoryDownloadsRepository();
+  const moduleRef: TestingModule = await Test.createTestingModule({
+    imports: [AppModule],
+  })
+    .overrideProvider(DEVICES_REPOSITORY)
+    .useValue(devices)
+    .overrideProvider(BOOKS_REPOSITORY)
+    .useValue(books)
+    .overrideProvider(CATEGORIES_REPOSITORY)
+    .useValue(categories)
+    .overrideProvider(SAGAS_REPOSITORY)
+    .useValue(sagas)
+    .overrideProvider(DOWNLOADS_REPOSITORY)
+    .useValue(downloads)
+    .compile();
+  const app = moduleRef.createNestApplication();
+  app.useGlobalPipes(buildValidationPipe());
+  await app.init();
+  return {
+    app,
+    downloads,
+    books,
+    promoteToAdmin: (deviceId: string) => {
+      adminSet.add(deviceId);
+    },
+  };
 }
 
 async function pairAndGetToken(app: INestApplication): Promise<string> {
@@ -618,7 +774,14 @@ describe('GET /api/downloads/stats', () => {
   });
 
   it('returns aggregated counts with top_books and top_devices', async () => {
-    const { app, books, downloads } = await buildApp();
+    // PR-N3 — ``/stats`` is admin-only. The test pairs, promotes
+    // to admin via the in-memory stub, then exercises the stats
+    // path. The repository is injected directly so we can seed
+    // rows whose ``device_id`` is NOT the bearer (the bearer is
+    // not allowed to write rows for another device through the
+    // HTTP path after 4R #42, so the seed goes through the
+    // repository directly).
+    const { app, books, downloads, promoteToAdmin } = await buildAppWithAdminFlag();
     try {
       const book1 = await seedBook(books, {
         title: 'A',
@@ -628,7 +791,13 @@ describe('GET /api/downloads/stats', () => {
         title: 'B',
         filePath: '/lib/b.epub',
       });
-      const token = await pairAndGetToken(app);
+      const pair = await request(app.getHttpServer())
+        .post('/api/auth/pair')
+        .send({ pin: '12345678', device_name: 'Admin' })
+        .expect(201);
+      const adminDeviceId = pair.body.device_id as string;
+      const token = pair.body.token as string;
+      promoteToAdmin(adminDeviceId);
       const deviceA = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
       const deviceB = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb';
 
@@ -984,3 +1153,377 @@ describe('IDOR hardening for /api/downloads (4R review #42)', () => {
 // Type-only re-export so the test can assert the repository contract
 // shape compiled into the production module matches what we mock.
 export type { DownloadsRepository };
+
+/**
+ * PR-N3 — admin gate on the downloads family.
+ *
+ * Spec: ``GET /api/downloads/stats``, ``GET /api/downloads/
+ * by-book/:book_id``, and ``GET /api/me/downloads`` (the
+ * latter open to every paired device) all sit behind the
+ * ``JwtAuthGuard``. The two admin-facing endpoints additionally
+ * require ``device.is_admin = true`` — a non-admin bearer gets
+ * ``403 ADMIN_REQUIRED`` so a paired (but unprivileged) client
+ * cannot read aggregated download telemetry.
+ *
+ * The admin gate lives in the controller (next to the existing
+ * path-vs-bearer privacy check on ``/by-device/:id``) so the
+ * service layer keeps a single responsibility: own the
+ * idempotency / aggregate query. The auth check is a request
+ * concern.
+ *
+ * ``GET /api/me/downloads`` is intentionally OPEN to every paired
+ * device (it lists the bearer's OWN downloads, filtered by
+ * ``req.device.deviceId`` server-side) — there is no admin check
+ * there.
+ */
+describe('PR-N3 admin gate on /api/downloads/*', () => {
+  afterEach(() => {
+    restoreEnv();
+  });
+
+  /**
+   * PR-N3 — admin gate tests reuse the top-level
+   * ``buildAppWithAdminFlag`` helper above. The auth gate is a
+   * controller-level concern (NOT a service-layer one) so it
+   * tests the whole HTTP surface end-to-end via the
+   * ``InMemoryDevicesRepository`` override.
+   */
+
+  it('GET /api/downloads/stats returns 403 ADMIN_REQUIRED for a non-admin bearer', async () => {
+    const { app } = await buildAppWithAdminFlag();
+    try {
+      const pair = await request(app.getHttpServer())
+        .post('/api/auth/pair')
+        .send({ pin: '12345678', device_name: 'Client' })
+        .expect(201);
+      const token = pair.body.token as string;
+      const res = await request(app.getHttpServer())
+        .get('/api/downloads/stats')
+        .set('Authorization', `Bearer ${token}`)
+        .expect(403);
+      expect(res.body.error.code).toBe('ADMIN_REQUIRED');
+      expect(res.body.error.message).toBe('admin role required');
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('GET /api/downloads/stats returns 200 for an admin bearer', async () => {
+    const { app, promoteToAdmin } = await buildAppWithAdminFlag();
+    try {
+      const pair = await request(app.getHttpServer())
+        .post('/api/auth/pair')
+        .send({ pin: '12345678', device_name: 'Admin' })
+        .expect(201);
+      const adminDeviceId = pair.body.device_id as string;
+      const token = pair.body.token as string;
+      promoteToAdmin(adminDeviceId);
+      const res = await request(app.getHttpServer())
+        .get('/api/downloads/stats')
+        .set('Authorization', `Bearer ${token}`)
+        .expect(200);
+      expect(res.body.total).toBe(0);
+      expect(res.body.completed).toBe(0);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('GET /api/downloads/by-book/:book_id returns 403 ADMIN_REQUIRED for a non-admin bearer', async () => {
+    const { app, books } = await buildAppWithAdminFlag();
+    try {
+      const book = await seedBook(books, {
+        title: 'Cien años de soledad',
+        filePath: '/lib/cien.epub',
+      });
+      const pair = await request(app.getHttpServer())
+        .post('/api/auth/pair')
+        .send({ pin: '12345678', device_name: 'Client' })
+        .expect(201);
+      const token = pair.body.token as string;
+      const res = await request(app.getHttpServer())
+        .get(`/api/downloads/by-book/${book.id}`)
+        .set('Authorization', `Bearer ${token}`)
+        .expect(403);
+      expect(res.body.error.code).toBe('ADMIN_REQUIRED');
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('GET /api/downloads/by-book/:book_id returns 200 + empty top_devices for an admin with no rows', async () => {
+    const { app, books, promoteToAdmin } = await buildAppWithAdminFlag();
+    try {
+      const book = await seedBook(books, {
+        title: 'Rayuela',
+        filePath: '/lib/rayuela.epub',
+      });
+      const pair = await request(app.getHttpServer())
+        .post('/api/auth/pair')
+        .send({ pin: '12345678', device_name: 'Admin' })
+        .expect(201);
+      const adminDeviceId = pair.body.device_id as string;
+      const token = pair.body.token as string;
+      promoteToAdmin(adminDeviceId);
+      const res = await request(app.getHttpServer())
+        .get(`/api/downloads/by-book/${book.id}`)
+        .set('Authorization', `Bearer ${token}`)
+        .expect(200);
+      expect(res.body.book_id).toBe(book.id);
+      expect(res.body.top_devices).toEqual([]);
+    } finally {
+      await app.close();
+    }
+  });
+
+  /**
+   * Triangulation — when there ARE rows, the response MUST rank
+   * the devices by count DESC with a stable ``device_id`` ASC
+   * tie-break. The fixture seeds three devices (3, 2, 1
+   * downloads respectively); the assertions pin the wire shape
+   * so a future refactor cannot silently break the contract.
+   */
+  it('GET /api/downloads/by-book/:book_id returns ranked top_devices when rows exist', async () => {
+    const { app, books, downloads, promoteToAdmin } = await buildAppWithAdminFlag();
+    try {
+      const book = await seedBook(books, {
+        title: 'Ficciones',
+        filePath: '/lib/ficciones.epub',
+      });
+      const pair = await request(app.getHttpServer())
+        .post('/api/auth/pair')
+        .send({ pin: '12345678', device_name: 'Admin' })
+        .expect(201);
+      const adminDeviceId = pair.body.device_id as string;
+      const token = pair.body.token as string;
+      promoteToAdmin(adminDeviceId);
+
+      const deviceA = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
+      const deviceB = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb';
+      const deviceC = 'cccccccc-cccc-cccc-cccc-cccccccccccc';
+
+      // 3 downloads from A, 2 from B, 1 from C. Seeded via the
+      // repository because 4R #42 stripped the body fields.
+      for (let i = 0; i < 3; i++) {
+        await downloads.insert({
+          bookId: book.id,
+          deviceId: deviceA,
+          deviceName: 'A',
+          fileSizeBytes: 100,
+        });
+      }
+      for (let i = 0; i < 2; i++) {
+        await downloads.insert({
+          bookId: book.id,
+          deviceId: deviceB,
+          deviceName: 'B',
+          fileSizeBytes: 100,
+        });
+      }
+      await downloads.insert({
+        bookId: book.id,
+        deviceId: deviceC,
+        deviceName: 'C',
+        fileSizeBytes: 100,
+      });
+
+      const res = await request(app.getHttpServer())
+        .get(`/api/downloads/by-book/${book.id}`)
+        .set('Authorization', `Bearer ${token}`)
+        .expect(200);
+      expect(res.body.book_id).toBe(book.id);
+      const top = res.body.top_devices as Array<{
+        device_id: string;
+        device_name: string;
+        count: number;
+        last_downloaded_at: string;
+      }>;
+      expect(top).toHaveLength(3);
+      expect(top[0]).toMatchObject({
+        device_id: deviceA,
+        device_name: 'A',
+        count: 3,
+      });
+      expect(top[1]).toMatchObject({
+        device_id: deviceB,
+        device_name: 'B',
+        count: 2,
+      });
+      expect(top[2]).toMatchObject({
+        device_id: deviceC,
+        device_name: 'C',
+        count: 1,
+      });
+      // last_downloaded_at MUST be a parseable ISO timestamp
+      // for every row so the admin dashboard can render it
+      // without a second call.
+      for (const row of top) {
+        expect(() => new Date(row.last_downloaded_at).toISOString()).not.toThrow();
+      }
+    } finally {
+      await app.close();
+    }
+  });
+});
+
+/**
+ * PR-N3 — ``GET /api/me/downloads``.
+ *
+ * Caller-scoped download history. The endpoint accepts any paired
+ * device (no admin check) and filters server-side by
+ * ``req.device.deviceId`` so the client cannot ask for another
+ * device's history by passing a different identifier. This is
+ * the privacy boundary on the /me/downloads surface.
+ */
+describe('GET /api/me/downloads', () => {
+  afterEach(() => {
+    restoreEnv();
+  });
+
+  it('returns 401 UNAUTHORIZED without a Bearer token', async () => {
+    const { app } = await buildApp();
+    try {
+      await request(app.getHttpServer())
+        .get('/api/me/downloads')
+        .expect(401);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('returns 200 with the bearer device\'s downloads only (privacy boundary)', async () => {
+    const { app, books, downloads } = await buildApp();
+    try {
+      const book = await seedBook(books, {
+        title: 'Borges',
+        filePath: '/lib/borges.epub',
+      });
+      const pair = await request(app.getHttpServer())
+        .post('/api/auth/pair')
+        .send({ pin: '12345678', device_name: 'Self' })
+        .expect(201);
+      const token = pair.body.token as string;
+      const bearerDeviceId = pair.body.device_id as string;
+      const other = 'dddddddd-dddd-dddd-dddd-dddddddddddd';
+
+      // One bearer-owned download via HTTP (server attributes
+      // it to the bearer's device).
+      await request(app.getHttpServer())
+        .post('/api/downloads')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ book_id: book.id, file_size_bytes: 100 })
+        .expect(201);
+      // A row belonging to a DIFFERENT device, injected via the
+      // repository. The bearer MUST NOT see it on /me/downloads.
+      await downloads.insert({
+        bookId: book.id,
+        deviceId: other,
+        deviceName: 'Other',
+        fileSizeBytes: 999,
+      });
+
+      const res = await request(app.getHttpServer())
+        .get('/api/me/downloads')
+        .set('Authorization', `Bearer ${token}`)
+        .expect(200);
+      const data = res.body.data as Array<{
+        device_id: string;
+      }>;
+      expect(data).toHaveLength(1);
+      expect(data[0]?.device_id).toBe(bearerDeviceId);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('returns 200 with empty data for a bearer with no downloads', async () => {
+    const { app } = await buildApp();
+    try {
+      const pair = await request(app.getHttpServer())
+        .post('/api/auth/pair')
+        .send({ pin: '12345678', device_name: 'Empty' })
+        .expect(201);
+      const token = pair.body.token as string;
+      const res = await request(app.getHttpServer())
+        .get('/api/me/downloads')
+        .set('Authorization', `Bearer ${token}`)
+        .expect(200);
+      expect(res.body.data).toEqual([]);
+    } finally {
+      await app.close();
+    }
+  });
+});
+
+/**
+ * PR-N3 — privacy check on ``GET /api/downloads/by-device/:device_id``.
+ *
+ * The endpoint is OPEN to every paired device, but the path param
+ * MUST equal the bearer's device. A mismatch returns 403
+ * ``FORBIDDEN`` so a paired (but unprivileged) device cannot ask
+ * for another device's download history by passing a different
+ * ``device_id``. The check already exists from 4R #42; this
+ * describe block adds triangulation coverage (3 positive /
+ * negative combinations) so the contract is locked.
+ */
+describe('PR-N3 privacy check on GET /api/downloads/by-device/:device_id', () => {
+  afterEach(() => {
+    restoreEnv();
+  });
+
+  it('returns 403 FORBIDDEN when the path param does not match the bearer', async () => {
+    const { app } = await buildApp();
+    try {
+      const token = await pairAndGetToken(app);
+      const pair = await request(app.getHttpServer())
+        .post('/api/auth/pair')
+        .send({ pin: '12345678', device_name: 'DeviceB' })
+        .expect(201);
+      const deviceB = pair.body.device_id as string;
+      const res = await request(app.getHttpServer())
+        .get(`/api/downloads/by-device/${deviceB}`)
+        .set('Authorization', `Bearer ${token}`)
+        .expect(403);
+      expect(res.body.error.code).toBe('FORBIDDEN');
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('returns 200 when the path param matches the bearer', async () => {
+    const { app } = await buildApp();
+    try {
+      const pair = await request(app.getHttpServer())
+        .post('/api/auth/pair')
+        .send({ pin: '12345678', device_name: 'Self' })
+        .expect(201);
+      const ownDeviceId = pair.body.device_id as string;
+      const token = pair.body.token as string;
+      const res = await request(app.getHttpServer())
+        .get(`/api/downloads/by-device/${ownDeviceId}`)
+        .set('Authorization', `Bearer ${token}`)
+        .expect(200);
+      expect(Array.isArray(res.body.data)).toBe(true);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('returns 403 even when the path param is a syntactically-valid but unknown UUID', async () => {
+    // A bearer with a valid token MUST NOT be able to query an
+    // arbitrary device_id that is not its own — even if no row
+    // exists for it. The check fires on identity mismatch, not
+    // on lookup result.
+    const { app } = await buildApp();
+    try {
+      const token = await pairAndGetToken(app);
+      const res = await request(app.getHttpServer())
+        .get('/api/downloads/by-device/00000000-0000-0000-0000-000000000000')
+        .set('Authorization', `Bearer ${token}`)
+        .expect(403);
+      expect(res.body.error.code).toBe('FORBIDDEN');
+    } finally {
+      await app.close();
+    }
+  });
+});
