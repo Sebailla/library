@@ -247,6 +247,35 @@ class InMemoryDownloadsRepository {
       .slice(0, limit);
   }
 
+  /**
+   * PR-N3 — caller-scoped list. Today the contract is identical
+   * to ``listByDevice``; the methods are kept distinct so a future
+   * divergence (e.g. an extra ``completed`` filter on
+   * ``/api/me/downloads``) does not silently affect the
+   * path-param-driven route.
+   */
+  async listForDevice(
+    deviceId: string,
+    opts: { limit?: number } = {},
+  ): Promise<InMemoryDownloadRow[]> {
+    return this.listByDevice(deviceId, opts);
+  }
+
+  /**
+   * PR-N3 — every download for a given book, newest first.
+   * Backed by the in-memory row store.
+   */
+  async findByBookId(
+    bookId: number,
+    opts: { limit?: number } = {},
+  ): Promise<InMemoryDownloadRow[]> {
+    const limit = opts.limit ?? 100;
+    const filtered = this.rows.filter((r) => r.bookId === bookId);
+    return filtered
+      .sort((a, b) => b.downloadedAt.getTime() - a.downloadedAt.getTime())
+      .slice(0, limit);
+  }
+
   async findById(id: number): Promise<InMemoryDownloadRow | null> {
     return this.rows.find((r) => r.id === id) ?? null;
   }

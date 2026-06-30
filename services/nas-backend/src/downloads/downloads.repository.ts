@@ -127,6 +127,23 @@ export interface DownloadsRepository {
    */
   updateProgress(id: number, bytesTransferred: number): Promise<void>;
   listByDevice(deviceId: string, opts?: { limit?: number }): Promise<Download[]>;
+  /**
+   * PR-N3 — caller-scoped list for ``GET /api/me/downloads``.
+   * Same shape as ``listByDevice``; the service keeps them as
+   * distinct methods so future divergences (e.g. an additional
+   * ``completed`` filter on the self-history endpoint) do not
+   * silently affect the path-param-driven route.
+   */
+  listForDevice(
+    deviceId: string,
+    opts?: { limit?: number },
+  ): Promise<Download[]>;
+  /**
+   * PR-N3 — every download for a given book, newest first. Backs
+   * the per-book activity log on the admin surface and the
+   * in-memory mirror used by the e2e tests.
+   */
+  findByBookId(bookId: number, opts?: { limit?: number }): Promise<Download[]>;
   findById(id: number): Promise<Download | null>;
   findCompletedForDeviceAndBook(
     deviceId: string,
@@ -203,6 +220,43 @@ export class PgDownloadsRepository implements DownloadsRepository {
        ORDER BY downloaded_at DESC, id DESC
        LIMIT $2`,
       [deviceId, limit],
+    );
+    return res.rows.map(rowToDownload);
+  }
+
+  /**
+   * PR-N3 — caller-scoped list for ``GET /api/me/downloads``.
+   * Semantically identical to ``listByDevice`` today (filter by
+   * ``device_id``, order by ``downloaded_at DESC``); kept as a
+   * separate method so future divergence on the self-history
+   * endpoint cannot silently affect the path-param-driven one.
+   */
+  async listForDevice(
+    deviceId: string,
+    opts: { limit?: number } = {},
+  ): Promise<Download[]> {
+    return this.listByDevice(deviceId, opts);
+  }
+
+  /**
+   * PR-N3 — every download for a given book, newest first. Powers
+   * the per-book activity log on the admin surface (a future
+   * chained PR may expose ``GET /api/downloads/by-book/:book_id/all``
+   * — for PR-N3 the contract is locked here so the admin tooling
+   * can call it directly).
+   */
+  async findByBookId(
+    bookId: number,
+    opts: { limit?: number } = {},
+  ): Promise<Download[]> {
+    const limit = opts.limit ?? 100;
+    const res = await this.pool.query<DownloadRow>(
+      `SELECT ${COLUMNS}
+       FROM downloads
+       WHERE book_id = $1
+       ORDER BY downloaded_at DESC, id DESC
+       LIMIT $2`,
+      [bookId, limit],
     );
     return res.rows.map(rowToDownload);
   }

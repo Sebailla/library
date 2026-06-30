@@ -51,6 +51,12 @@ class StubDownloadsRepository {
   async listByDevice() {
     return [];
   }
+  async listForDevice() {
+    return [];
+  }
+  async findByBookId() {
+    return [];
+  }
   async findCompletedForDeviceAndBook() {
     return null;
   }
