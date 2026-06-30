@@ -28,11 +28,20 @@ import {
   MetricsService,
 } from './observability/metrics.service';
 import { buildRequestMiddleware } from './observability/request-middleware';
+import { mountOpenApi } from './common/openapi.bootstrap';
 
 async function bootstrap(): Promise<void> {
   const app = await NestFactory.create(AppModule, {
     logger: ['error', 'warn', 'log'],
   });
+
+  // PR-N6 (issue #90) — OpenAPI 3.x spec + Swagger UI at
+  // /api/docs and /api/docs-json. Mounted BEFORE app.init()
+  // because, in test mode, express middleware added after init is
+  // not visible through app.getHttpServer() (the supertest pattern
+  // used by every e2e suite in this repo). Mirroring the controller
+  // registration lifecycle keeps production and tests consistent.
+  mountOpenApi(app);
 
   // 4R review #41 — global ValidationPipe with the project envelope.
   app.useGlobalPipes(buildValidationPipe());

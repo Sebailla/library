@@ -10,6 +10,17 @@ import {
   Res,
   UseGuards,
 } from '@nestjs/common';
+import {
+  ApiAcceptedResponse,
+  ApiBearerAuth,
+  ApiBody,
+  ApiForbiddenResponse,
+  ApiNotFoundResponse,
+  ApiOkResponse,
+  ApiOperation,
+  ApiTags,
+  ApiUnauthorizedResponse,
+} from '@nestjs/swagger';
 import { Response } from 'express';
 import { randomUUID } from 'crypto';
 import { IsInt, Min } from 'class-validator';
@@ -23,6 +34,7 @@ import {
 } from './scan.types';
 import { ScanService } from './scan.service';
 import { ScanEventBus } from './scan-event-bus';
+import { ApiValidationResponse } from '../../common/openapi.decorators';
 
 /**
  * Body shape for ``POST /api/admin/scan/incremental``.
@@ -105,6 +117,8 @@ function toScanJobDto(job: ScanJob): ScanJobDto {
  * that converts snake_case wire bodies to the service DTOs and
  * back.
  */
+@ApiTags('admin')
+@ApiBearerAuth('bearer')
 @Controller({ path: 'api/admin/scan', version: undefined })
 @UseGuards(JwtAuthGuard, ScanAdminGuard)
 export class ScanController {
@@ -115,6 +129,19 @@ export class ScanController {
 
   @Post('full')
   @HttpCode(HttpStatus.ACCEPTED)
+  @ApiOperation({
+    summary: 'Enqueue a full NAS-wide scan (admin only)',
+    description:
+      'Scans every library on the NAS. Returns the enqueued job id; the client tracks progress via `GET /api/admin/scan/status/:job_id` and the SSE stream at `GET /api/admin/scan/events/:job_id`. Requires `is_admin = true` on the paired device.',
+  })
+  @ApiAcceptedResponse({
+    description: 'Full scan enqueued',
+    schema: {
+      example: { job_id: 'f47ac10b-58cc-4372-a567-0e02b2c3d479' },
+    },
+  })
+  @ApiUnauthorizedResponse()
+  @ApiForbiddenResponse()
   async enqueueFull(): Promise<EnqueueScanResponse> {
     const job = await this.scanService.enqueueScan({
       id: randomUUID(),
@@ -126,6 +153,26 @@ export class ScanController {
 
   @Post('incremental')
   @HttpCode(HttpStatus.ACCEPTED)
+  @ApiOperation({
+    summary: 'Enqueue an incremental scan for one library (admin only)',
+    description:
+      'Walks a single library’s `root_path` for new / changed files. Requires `library_id >= 1`. Admin-only.',
+  })
+  @ApiBody({
+    description: 'Incremental scan parameters',
+    schema: {
+      example: { library_id: 1 },
+    },
+  })
+  @ApiAcceptedResponse({
+    description: 'Incremental scan enqueued',
+    schema: {
+      example: { job_id: 'f47ac10b-58cc-4372-a567-0e02b2c3d479' },
+    },
+  })
+  @ApiUnauthorizedResponse()
+  @ApiForbiddenResponse()
+  @ApiValidationResponse()
   async enqueueIncremental(
     @Body() body: EnqueueIncrementalBody,
   ): Promise<EnqueueScanResponse> {
@@ -138,12 +185,24 @@ export class ScanController {
   }
 
   @Get('status')
+  @ApiOperation({
+    summary: 'List every scan job known to the server',
+    description: 'Returns all jobs (queued, running, done, cancelled, failed).',
+  })
+  @ApiOkResponse({ description: 'List of scan jobs' })
+  @ApiUnauthorizedResponse()
+  @ApiForbiddenResponse()
   async list(): Promise<ListScanJobsResponse> {
     const jobs = await this.scanService.listJobs();
     return { jobs: jobs.map(toScanJobDto) };
   }
 
   @Get('status/:job_id')
+  @ApiOperation({ summary: 'Get one scan job by id' })
+  @ApiOkResponse({ description: 'Scan job detail' })
+  @ApiUnauthorizedResponse()
+  @ApiForbiddenResponse()
+  @ApiNotFoundResponse()
   async detail(
     @Param('job_id') jobId: string,
   ): Promise<{ job: ScanJobDto }> {
@@ -161,6 +220,18 @@ export class ScanController {
 
   @Post('cancel/:job_id')
   @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Cancel a queued or running scan job',
+    description:
+      'Cooperative cancellation — the worker checks the flag between files. Returns 200 with `cancelled: true` if the job was running or queued, `cancelled: false` if it already finished.',
+  })
+  @ApiOkResponse({
+    description: 'Cancellation outcome',
+    schema: { example: { cancelled: true } },
+  })
+  @ApiUnauthorizedResponse()
+  @ApiForbiddenResponse()
+  @ApiNotFoundResponse()
   async cancel(
     @Param('job_id') jobId: string,
   ): Promise<{ cancelled: boolean }> {
