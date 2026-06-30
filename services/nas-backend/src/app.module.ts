@@ -13,6 +13,7 @@ import { WorkersModule } from './workers/workers.module';
 import { DiscoveryModule } from './discovery/discovery.module';
 import { FilesModule } from './files/files.module';
 import { LibrariesModule } from './libraries/libraries.module';
+import { ScanModule } from './admin/scan/scan.module';
 
 /**
  * Reshape {@link ThrottlerException} into the project's standard
@@ -77,6 +78,13 @@ class ThrottlerExceptionFilter implements ExceptionFilter {
  * ``BOOKS_REPOSITORY.countByLibrary`` to enforce the
  * "refuse DELETE when books are indexed" rule.
  *
+ * PR-N4 adds the ``ScanModule`` which exposes the
+ * ``/api/admin/scan/*`` HTTP surface — admin-only full /
+ * incremental scan enqueue, status listing, cooperative
+ * cancellation, and SSE progress streaming. The module is gated
+ * by ``JwtAuthGuard`` + ``ScanAdminGuard`` so only paired devices
+ * with ``is_admin = true`` (migration 015) can trigger a scan.
+ *
  * Rate limiting (#34, 4R review): ``ThrottlerModule`` is
  * registered with three named buckets (see ``throttlers`` array
  * below) and the ``ThrottlerGuard`` is bound as a global APP_GUARD
@@ -112,6 +120,7 @@ class ThrottlerExceptionFilter implements ExceptionFilter {
     DiscoveryModule,
     FilesModule,
     LibrariesModule,
+    ScanModule,
   ],
   providers: [
     {

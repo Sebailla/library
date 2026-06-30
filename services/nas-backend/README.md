@@ -35,6 +35,12 @@ NestJS application that backs the **alejandria-v2** NAS catalog.
 >   `/api/downloads/by-book/:book_id` (403 `ADMIN_REQUIRED`), plus
 >   `GET /api/me/downloads` (caller-scoped) and the privacy check
 >   on `/api/downloads/by-device/:device_id` (path-vs-bearer match).
+> - **PR-N4** — `ScanModule` (`/api/admin/scan/*` admin-only full /
+>   incremental scan enqueue + status list + cooperative cancel +
+>   SSE progress streaming). `scan_jobs` table (migration 016) is
+>   the durable record; a BullMQ worker (`admin-scan` queue) walks
+>   `library.root_path` cooperatively, observing the `cancelled`
+>   flag between files.
 
 ## Stack
 
@@ -79,6 +85,15 @@ services/nas-backend/
 │   │   ├── libraries.repository.ts # PgLibrariesRepository + LIBRARIES_REPOSITORY token
 │   │   ├── libraries.adapters.ts # PgLibraryBookCountAdapter, PgDeviceLookupAdapter
 │   │   └── libraries.types.ts  # Library, NewLibrary, LibraryPatch, DeviceLibrary
+│   ├── admin/                   # PR-N4 — admin-only HTTP surfaces
+│   │   └── scan/                #   PR-N4 admin scan (enqueue, status, cancel, SSE)
+│   │       ├── scan.module.ts       # wires controller + service + repository + event bus + BullMQ producer
+│   │       ├── scan.controller.ts   # POST/GET /api/admin/scan/* + SSE
+│   │       ├── scan.service.ts      # enqueue + cancel orchestration
+│   │       ├── scan.repository.ts   # PgScanRepository + SCAN_REPOSITORY token
+│   │       ├── scan-admin.guard.ts  # JwtAuthGuard + DEVICES_REPOSITORY.is_admin check
+│   │       ├── scan-event-bus.ts    # per-jobId EventEmitter wrapper for SSE fan-out
+│   │       └── scan.types.ts        # ScanJob, ScanJobKind, ScanJobStatus, ScanProgressEvent, NewScanJob
 │   └── health/
 │       ├── health.controller.ts
 │       ├── health.module.ts
@@ -659,6 +674,108 @@ implementations.
 | `012_libraries.sql`          | `libraries` table — `BIGSERIAL id`, `name`, `root_path`, `created_by_device_id UUID NULL`, `created_at`. Index on `created_by_device_id` (partial, `WHERE NOT NULL`). |
 | `013_device_libraries.sql`   | `device_libraries(device_id UUID, library_id BIGINT REFERENCES libraries(id) ON DELETE CASCADE, active BOOLEAN)` with composite PK + partial index on `(device_id, active)`. |
 | `014_books_library_id.sql`   | `ALTER TABLE books ADD COLUMN library_id BIGINT REFERENCES libraries(id)` + B-tree index. Column is NULLABLE so the MVP import path can land books before library resolution is known. |
+
+## Admin scan (PR-N4)
+
+PR-N4 closes the admin-driven scan surface: before this PR the
+only way to trigger a scan was via the filesystem watcher
+(PR-2E). Operators could not force a full rescan, request an
+incremental scan on a specific library, observe progress
+without tailing BullMQ, or cancel a running scan.
+
+The `scan_jobs` table (migration 016) is the durable record of
+every admin scan request. The HTTP layer (`/api/admin/scan/*`)
+is gated by `JwtAuthGuard` + `ScanAdminGuard` — every endpoint
+returns `403 ADMIN_REQUIRED` for a paired (but unprivileged)
+device. The BullMQ worker (`admin-scan` queue) walks
+`library.root_path` cooperatively, observing the `cancelled`
+flag between files; the SSE endpoint multiplexes the
+`ScanEventBus` so the iPad client gets a per-job progress
+channel.
+
+### Endpoints
+
+| Method | Path                                  | Auth      | Status | Body                                        |
+|--------|---------------------------------------|-----------|--------|---------------------------------------------|
+| POST   | `/api/admin/scan/full`                | admin     | 202    | `{}` (no library_id → whole-NAS scan)       |
+| POST   | `/api/admin/scan/incremental`         | admin     | 202    | `{ "library_id": <int> }` (required)        |
+| GET    | `/api/admin/scan/status`              | admin     | 200    | `{ jobs: ScanJobDto[] }` (newest first)     |
+| GET    | `/api/admin/scan/status/:job_id`      | admin     | 200/404| `{ job: ScanJobDto }` or 404 NOT_FOUND      |
+| POST   | `/api/admin/scan/cancel/:job_id`      | admin     | 200    | `{ cancelled: bool }` (true / false)        |
+| GET    | `/api/admin/scan/events/:job_id`      | admin     | 200/404| SSE stream of `ScanProgressEvent` objects   |
+
+Every non-`events` endpoint returns `{ job_id }` (or the
+appropriate response body) on success. Non-admin bearers get
+`{ error: { code: "ADMIN_REQUIRED", message: "admin role required" } }`
+with HTTP 403. Missing or invalid Bearer tokens get
+`{ error: { code: "UNAUTHORIZED", message: "..." } }` with HTTP 401.
+
+### Wire shapes
+
+**`ScanJobDto`** (returned by `GET /status` and `GET /status/:id`):
+
+```jsonc
+{
+  "id": "11111111-1111-1111-1111-111111111111",
+  "library_id": 7,                  // null for whole-NAS scans
+  "kind": "full",                   // "full" | "incremental"
+  "status": "running",              // queued | running | done | cancelled | failed
+  "started_at": "2026-06-29T12:00:00Z",
+  "finished_at": null,
+  "total_files": 1024,
+  "processed_files": 256,
+  "cancelled": false,
+  "error": null                     // populated when status == "failed"
+}
+```
+
+**`ScanProgressEvent`** (SSE `data:` payload):
+
+```jsonc
+{
+  "jobId": "11111111-1111-1111-1111-111111111111",
+  "type": "progress",               // progress | done | cancelled | failed
+  "processed": 256,
+  "total": 1024,                    // null until the worker finishes walking
+  "error": "...",                   // only on "failed"
+  "timestamp": "2026-06-29T12:00:01Z"
+}
+```
+
+The SSE stream sends each event as two lines:
+
+```
+event: progress
+data: {"jobId":"...","type":"progress","processed":256,"total":1024,"timestamp":"..."}
+
+```
+
+The server closes the response when:
+1. The client disconnects (`res.on('close')`),
+2. The job reaches a terminal status — the bus delivers the
+   matching event and we `res.end()`, or
+3. The initial row lookup fails (`404 NOT_FOUND`).
+
+For a job that is already terminal when a client connects, the
+controller synthesises the final event from the row so late
+subscribers still get a single deterministic event.
+
+### Cooperative cancellation
+
+The worker checks the `cancelled` flag between files. The
+controller flips the flag via `POST /api/admin/scan/cancel/
+:job_id`; the worker observes it on the next iteration and
+transitions to `cancelled` without touching any further file.
+A cancel request against a job already in a terminal status
+(`done` / `failed` / `cancelled`) returns `{ cancelled:
+false }` — flipping the flag after the worker has finished
+would race with the worker's own bookkeeping.
+
+### Migrations
+
+| Migration                    | What it adds                                                                                          |
+|------------------------------|-------------------------------------------------------------------------------------------------------|
+| `016_admin_scan_jobs.sql`    | `scan_jobs(id UUID PK, library_id BIGINT REFERENCES libraries(id) NULL, kind CHECK ('full','incremental'), status CHECK ('queued','running','done','cancelled','failed'), started_at / finished_at TIMESTAMPTZ, total_files INT, processed_files INT DEFAULT 0, cancelled BOOLEAN DEFAULT FALSE, error TEXT)`. Indexes on `status` (admin list endpoint, worker pickup loop) and `library_id` (per-library history view). |
 
 ## Migrations
 

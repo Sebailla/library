@@ -71,6 +71,37 @@ class StubDownloadsRepository {
   }
 }
 
+/**
+ * PR-N4 — stub the new collaborators the bootstrap now
+ * requires for the admin scan wiring. ``scanRepo`` /
+ * ``scanBus`` are never exercised in the "skip when Redis is
+ * down" path; the stubs satisfy the type-checker and let the
+ * no-op branches run.
+ */
+class StubScanRepository {
+  async getJob() { return null; }
+  async setJobStatus() { return null; }
+  async setJobError() { return null; }
+  async updateProgress() { return null; }
+  async isCancelled() { return false; }
+  async requestCancellation() { /* no-op */ }
+  async insertJob() { return {} as never; }
+  async listJobs() { return []; }
+  async close() { /* no-op */ }
+}
+
+class StubLibrariesRepository {
+  async findById() { return null; }
+  async list() { return []; }
+  async insert() { return {} as never; }
+  async update() { return null; }
+  async delete() { return true; }
+  async setActiveForDevice() { /* no-op */ }
+  async getActiveForDevice() { return null; }
+  async listForDevice() { return []; }
+  async close() { /* no-op */ }
+}
+
 describe('WorkersBootstrap', () => {
   // Suppress the bootstrap's intentional ``logger.warn`` output
   // during tests so the suite output stays clean.
@@ -87,6 +118,10 @@ describe('WorkersBootstrap', () => {
       null,
       new ScanProcessor(),
       new DownloadsProcessor(new StubDownloadsRepository()),
+      new StubScanRepository() as never,
+      // ``ScanEventBus`` constructor takes no args.
+      new (require('../../src/admin/scan/scan-event-bus').ScanEventBus)(),
+      new StubLibrariesRepository() as never,
     );
     await bootstrap.onModuleInit();
     // No exceptions, no workers started. Closing the bootstrap
@@ -110,6 +145,9 @@ describe('WorkersBootstrap', () => {
       client,
       new ScanProcessor(),
       new DownloadsProcessor(new StubDownloadsRepository()),
+      new StubScanRepository() as never,
+      new (require('../../src/admin/scan/scan-event-bus').ScanEventBus)(),
+      new StubLibrariesRepository() as never,
     );
     // The probe caps the wait at 750ms; we extend the Jest
     // timeout slightly to absorb DNS / handshake overhead.
