@@ -63,12 +63,12 @@ describe('syncer (PR-N8, iCloud sync engine)', () => {
   })
 
   it('push() emits a change event for every file written into the iCloud root', async () => {
-    const { createIcloudSyncer } = await import('../src/syncer')
-    // awaitWriteFinish + stabilityThreshold (default 200 ms below)
-    // means chokidar WILL debounce the event for that long before
-    // emitting — pick a smaller stability window for the test so
-    // the suite stays fast.
-    const syncer = createIcloudSyncer({ cloudDir, awaitWriteFinishMs: 25 })
+    const { createIcloudSyncerReady } = await import('../src/syncer')
+    // Use the `Ready` factory so the watcher is fully wired
+    // (chokidar has emitted its `ready` event) BEFORE the test
+    // writes a file — without this, the write can race the
+    // listener registration on slow runners.
+    const syncer = await createIcloudSyncerReady({ cloudDir, awaitWriteFinishMs: 25 })
     // drain the startup pull
     await syncer.pull()
 
@@ -76,10 +76,13 @@ describe('syncer (PR-N8, iCloud sync engine)', () => {
     syncer.on('change', (file: string) => seen.push(file))
 
     writeFileSync(join(cloudDir, 'fresh.json'), '{"id":4}')
-    // chokidar debounces add events slightly across platforms; give
-    // it a moment to settle (stability + pollInterval on top of
-    // our 25 ms threshold = ~150 ms in practice).
-    await wait(400)
+    // Poll for up to 2 s because chokidar's awaitWriteFinish
+    // depends on platform-specific debouncing; the event is
+    // eventually emitted, we just don't know exactly when.
+    const deadline = Date.now() + 2_000
+    while (Date.now() < deadline && !seen.some((f) => f.endsWith('fresh.json'))) {
+      await wait(50)
+    }
 
     expect(seen.some((f) => f.endsWith('fresh.json'))).toBe(true)
     await syncer.close()

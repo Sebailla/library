@@ -170,10 +170,54 @@ export function createIcloudSyncer(options: IcloudSyncerOptions = {}): IcloudSyn
     depth: 99,
   }) as FSWatcher
   const syncer = new IcloudSyncer(watcher, cloudDir)
+  // Drain any per-event streams chokidar emits so the listener
+  // registration happens BEFORE the `ready` event fires (the
+  // first `add` events for existing files arrive between
+  // construction and `ready`). Without this, an integration
+  // test that writes a file immediately after the factory
+  // returns can race the listener registration.
   watcher.on('add', (path) => syncer.emit('change', path))
   watcher.on('change', (path) => syncer.emit('change', path))
   watcher.on('unlink', (path) => syncer.emit('change', path))
   return syncer
+}
+
+/**
+ * Build an {@link IcloudSyncer} and resolve once chokidar has
+ * emitted its `ready` event (i.e. the initial scan is complete
+ * and every subsequent write will be observed). Tests SHOULD use
+ * this so the watcher is fully wired before they write to the
+ * directory; production callers (the IPC handler) can use the
+ * simpler {@link createIcloudSyncer} because they do not write
+ * during startup.
+ */
+export function createIcloudSyncerReady(
+  options: IcloudSyncerOptions = {},
+): Promise<IcloudSyncer> {
+  return new Promise((resolve, reject) => {
+    const cloudDir = options.cloudDir ?? defaultIcloudDir()
+    const chokidarImpl = options.chokidarImpl ?? chokidar
+    const watcher = chokidarImpl.watch(cloudDir, {
+      ignoreInitial: false,
+      persistent: true,
+      awaitWriteFinish: { pollInterval: 50, stabilityThreshold: options.awaitWriteFinishMs ?? 200 },
+      depth: 99,
+    }) as FSWatcher
+    let settled = false
+    const settle = (fn: () => void): void => {
+      if (settled) return
+      settled = true
+      fn()
+    }
+    watcher.once('ready', () => {
+      const syncer = new IcloudSyncer(watcher, cloudDir)
+      watcher.on('add', (path) => syncer.emit('change', path))
+      watcher.on('change', (path) => syncer.emit('change', path))
+      watcher.on('unlink', (path) => syncer.emit('change', path))
+      settle(() => resolve(syncer))
+    })
+    watcher.once('error', (err) => settle(() => reject(err)))
+  })
 }
 
 /**
