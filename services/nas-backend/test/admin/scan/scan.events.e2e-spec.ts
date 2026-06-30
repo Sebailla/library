@@ -1,6 +1,8 @@
 import { INestApplication } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import request from 'supertest';
+import * as http from 'http';
+import type { Server } from 'http';
 import { AppModule } from '../../../src/app.module';
 import { DEVICES_REPOSITORY } from '../../../src/auth/devices.repository';
 import { LIBRARIES_REPOSITORY } from '../../../src/libraries/libraries.repository';
@@ -329,21 +331,46 @@ describe('GET /api/admin/scan/events/:job_id (SSE)', () => {
     });
     try {
       const token = await pairAndGetToken(app);
-      const res = await request(app.getHttpServer())
-        .get('/api/admin/scan/events/bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb')
-        .set('Authorization', `Bearer ${token}`)
-        .buffer(true)
-        .parse((response, callback) => {
-          let data = '';
-          response.on('data', (chunk) => { data += chunk.toString(); });
-          response.on('end', () => callback(null, data));
-        })
-        .timeout(2000)
-        .expect(200);
-      const text =
-        (res as unknown as { body: string }).body ??
-        (res as unknown as { text: string }).text;
-      expect(text).toMatch(/^:keepalive\n\n/m);
+      // supertest cannot end a streaming response that the server
+      // keeps open; drop down to the raw http client so we can
+      // collect bytes, then destroy the socket after the first
+      // :keepalive frame arrives. A 50ms tick means we expect
+      // the first heartbeat inside ~100ms (one full tick plus
+      // Express/Node scheduling jitter); the 1s safety net
+      // covers slower CI hosts without hanging Jest.
+      await app.listen(0);
+      const server = app.getHttpServer() as Server;
+      const address = server.address();
+      if (!address || typeof address === 'string') {
+        throw new Error('test server has no TCP address');
+      }
+      const text = await new Promise<string>((resolve) => {
+        const req = http.request(
+          {
+            host: '127.0.0.1',
+            port: address.port,
+            path: '/api/admin/scan/events/bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb',
+            method: 'GET',
+            headers: { Authorization: `Bearer ${token}` },
+          },
+          (res) => {
+            let data = '';
+            res.setEncoding('utf8');
+            res.on('data', (chunk: string) => {
+              data += chunk;
+              if (data.includes(':keepalive\n\n')) {
+                req.destroy();
+              }
+            });
+            res.on('end', () => resolve(data));
+            res.on('error', () => resolve(data));
+          },
+        );
+        req.on('error', () => resolve(''));
+        req.end();
+        setTimeout(() => req.destroy(), 1000);
+      });
+      expect(text).toMatch(/:keepalive\n\n/);
     } finally {
       await app.close();
     }

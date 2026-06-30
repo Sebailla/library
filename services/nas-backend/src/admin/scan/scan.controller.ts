@@ -4,6 +4,7 @@ import {
   Get,
   HttpCode,
   HttpStatus,
+  Inject,
   NotFoundException,
   Param,
   Post,
@@ -35,6 +36,24 @@ import {
 import { ScanService } from './scan.service';
 import { ScanEventBus } from './scan-event-bus';
 import { ApiValidationResponse } from '../../common/openapi.decorators';
+
+/**
+ * Provider token for the SSE heartbeat interval (issue #100).
+ *
+ * The controller writes ``:keepalive\n\n`` comment lines every
+ * interval so reverse proxies (nginx, Cloudflare) do not buffer
+ * or close an idle connection. 25s is the spec default — well
+ * under the typical 60s idle-timeout of nginx's ``proxy_read_timeout``
+ * while still being long enough that long-running scans do not
+ * drown the client in pings.
+ *
+ * Tests override this with a much smaller interval (50ms) so the
+ * RED-GREEN cycle does not have to wait the full 25 seconds.
+ */
+export const SSE_HEARTBEAT_INTERVAL_MS = 'SSE_HEARTBEAT_INTERVAL_MS';
+
+/** Default heartbeat cadence for the SSE stream (issue #100). */
+export const SSE_HEARTBEAT_DEFAULT_MS = 25_000;
 
 /**
  * Body shape for ``POST /api/admin/scan/incremental``.
@@ -125,6 +144,8 @@ export class ScanController {
   constructor(
     private readonly scanService: ScanService,
     private readonly bus: ScanEventBus,
+    @Inject(SSE_HEARTBEAT_INTERVAL_MS)
+    private readonly heartbeatIntervalMs: number = SSE_HEARTBEAT_DEFAULT_MS,
   ) {}
 
   @Post('full')
@@ -310,7 +331,17 @@ export class ScanController {
     }
 
     const unsub = this.bus.subscribe(jobId, writeEvent);
+    const heartbeat = setInterval(() => {
+      // SSE comment line: ignored by EventSource clients but
+      // flushes any buffer between the server and the proxy.
+      res.write(':keepalive\n\n');
+    }, this.heartbeatIntervalMs);
+    // A heartbeat is a no-op once the response is closed; do not
+    // let it keep the Node event loop alive past the client
+    // disconnect.
+    heartbeat.unref?.();
     const onClose = (): void => {
+      clearInterval(heartbeat);
       unsub();
       res.end();
     };
