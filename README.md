@@ -12,6 +12,8 @@ biblioteca-v2/
 ├── services/
 │   ├── extractors-py/   PR1 — Python sidecar CLI
 │   └── nas-backend/     PR2 — NestJS + Postgres + Redis + workers
+│                         Published to docker.io/sebailla001/alejandria-nas-bockend
+│                         on every v* tag (see DOCKERHUB_SETUP.md)
 ├── apps/
 │   ├── web/             PR3 — Next.js 16 + React 19 App Router
 │   └── mac/             PR4 — Electron shell wrapping apps/web
@@ -19,6 +21,11 @@ biblioteca-v2/
     ├── core/types/      Shared TS types mirroring alejandria/core/models.py
     └── sidecar/         Shared sidecar spawn + path sanitization (PR-3-fix-B)
 ```
+
+The NAS backend container is published to Docker Hub on every `v*` tag.
+See [DOCKERHUB_SETUP.md](DOCKERHUB_SETUP.md) (Spanish mirror:
+[Documents-es/DOCKERHUB_SETUP.md](Documents-es/DOCKERHUB_SETUP.md))
+for the setup walkthrough.
 
 ## PR status
 
@@ -32,6 +39,7 @@ biblioteca-v2/
 | PR-4A | 7-layer ISBN resolution pipeline (`apps/web/lib/isbn-resolver/`) | Merged |
 | PR-4B | iCloud Drive activity sync layer (`apps/web/lib/sync/`) | **This PR** |
 | PR4 | Electron shell + iCloud Drive (full PR4) | Pending |
+| Docker Hub publish | Multi-arch `alejandria-nas-bockend` image on Docker Hub via `.github/workflows/docker-publish.yml` (issue #106) | **This PR** |
 
 ## Running `apps/web/` (PR-3C)
 
