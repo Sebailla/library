@@ -59,3 +59,6 @@ packages/**/package-lock.json
 services/**/bin/
 services/**/layout.v4
 services/nas-backend/bin/
+
+# Volta lock files (local tool, not part of the repo)
+**/volta.lock
