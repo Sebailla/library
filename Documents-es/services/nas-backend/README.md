@@ -211,3 +211,28 @@ del propio worker.
 | Migración                     | Qué agrega                                                                                              |
 |-------------------------------|---------------------------------------------------------------------------------------------------------|
 | `016_admin_scan_jobs.sql`     | `scan_jobs(id UUID PK, library_id BIGINT REFERENCES libraries(id) NULL, kind CHECK ('full','incremental'), status CHECK ('queued','running','done','cancelled','failed'), started_at / finished_at TIMESTAMPTZ, total_files INT, processed_files INT DEFAULT 0, cancelled BOOLEAN DEFAULT FALSE, error TEXT)`. Índices sobre `status` (endpoint admin list, loop de pickup del worker) y `library_id` (vista de historial por library). |
+
+## Observabilidad (PR-N7, issue #92)
+
+El `ObservabilityModule` expone un endpoint de métricas compatible
+con Prometheus en `GET /metrics`. El endpoint es intencionalmente
+sin autenticación para que los scrapers (Prometheus, Grafana
+Agent, etc.) puedan pollearlo sin manejar un bearer token; los
+operadores que quieran bloquearlo deben poner un ACL de red
+delante (firewall o Tailscale ACL).
+
+Métricas expuestas:
+
+```
+http_requests_total{method,path,status}            counter
+http_request_duration_seconds                      histogram
+scan_jobs_total{status}                            counter
+scan_job_duration_seconds                          histogram
+downloads_total{state}                             counter
+download_bytes                                     histogram
+```
+
+Propagación de `request_id`: el middleware global honra un header
+`X-Request-Id` entrante (o genera un UUID v4) y siembra un
+`AsyncLocalStorage` para que cada línea de log de Pino emitida
+durante el request lleve `{request_id, route, method}`.
