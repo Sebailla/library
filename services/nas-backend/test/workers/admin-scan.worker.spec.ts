@@ -1,8 +1,8 @@
 import { Logger } from '@nestjs/common';
 import {
   AdminScanWorker,
-  buildAdminScanWorkerOptions,
 } from '../../src/workers/admin-scan.worker';
+import * as adminScanWorkerModule from '../../src/workers/admin-scan.worker';
 import {
   SCAN_REPOSITORY,
 } from '../../src/admin/scan/scan.repository';
@@ -228,11 +228,17 @@ describe('AdminScanWorker', () => {
   });
 });
 
-describe('buildAdminScanWorkerOptions', () => {
-  it('shares the queue defaults with the producer (attempts/backoff/removeOn*)', () => {
-    const opts = buildAdminScanWorkerOptions();
-    expect(opts.attempts).toBe(3);
-    expect(opts.removeOnComplete).toEqual({ age: 3600, count: 1000 });
-    expect(opts.removeOnFail).toEqual({ age: 86400 });
+describe('buildAdminScanWorkerOptions (issue #98 — dead wrapper)', () => {
+  // Issue #98 — the ``buildAdminScanWorkerOptions()`` helper in
+  // ``admin-scan.worker.ts`` was a thin pass-through over
+  // ``buildQueueOptions()`` consumed only by this spec. The
+  // bootstrap already wires the worker options straight from
+  // ``buildQueueOptions()`` (see ``workers.module.ts``), so the
+  // wrapper duplicates the retry knobs without value. RED test:
+  // the wrapper must not be exported by ``admin-scan.worker.ts``.
+  it('is no longer exported by admin-scan.worker.ts (use buildQueueOptions instead)', () => {
+    expect(
+      'buildAdminScanWorkerOptions' in (adminScanWorkerModule as Record<string, unknown>),
+    ).toBe(false);
   });
 });
