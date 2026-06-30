@@ -11,6 +11,19 @@ import type { DownloadStats } from '../downloads/downloads.repository';
 import type { MetricsService } from './metrics.service';
 
 /**
+ * DI token for the metric-instrumented downloads service.
+ *
+ * Issue #99 — controllers inject this token (NOT
+ * {@link MetricsService} directly) so the "which states fire
+ * which counters" decision lives in ONE place
+ * ({@link instrumentDownloadsService}). Wiring this token in
+ * ``DownloadsModule`` finally turns the otherwise-dead
+ * ``instrumentDownloadsService`` factory into the single
+ * public surface for download metrics.
+ */
+export const INSTRUMENTED_DOWNLOADS_SERVICE = 'INSTRUMENTED_DOWNLOADS_SERVICE';
+
+/**
  * Surface implemented by {@link instrumentDownloadsService}. The
  * adapter mirrors {@link DownloadsService} so call sites swap one
  * for the other with no signature changes.
@@ -45,6 +58,13 @@ export interface InstrumentedDownloadsService {
  * ``MetricsService.recordDownload`` — controllers, workers and
  * tests go through here. This keeps the "which states fire
  * which metrics" decision in ONE place.
+ *
+ * Issue #99 — failure series. ``createDownload`` and
+ * ``updateDownload`` both flow through a ``try/catch`` that
+ * records ``downloads_total{state=\"failed\"}`` on throw and
+ * re-throws so the controller layer can shape the HTTP error
+ * envelope. Without this branch the failure rate is permanently
+ * zero in dashboards.
  */
 export function instrumentDownloadsService(
   inner: DownloadsService,
@@ -53,7 +73,14 @@ export function instrumentDownloadsService(
   return {
     async createDownload(input) {
       metrics.recordDownload('started', 0);
-      return inner.createDownload(input);
+      try {
+        return await inner.createDownload(input);
+      } catch (err) {
+        // Bytes are unknown on the create path (the row never landed),
+        // so we observe the histogram at 0 — cardinality is unchanged.
+        metrics.recordDownload('failed', 0);
+        throw err;
+      }
     },
     async updateDownload(id, input) {
       // The byte observation is recorded UNCONDITIONALLY so
@@ -63,7 +90,15 @@ export function instrumentDownloadsService(
       if (input.completed) {
         metrics.recordDownload('completed', input.bytesTransferred);
       }
-      return inner.updateDownload(id, input);
+      try {
+        return await inner.updateDownload(id, input);
+      } catch (err) {
+        // Observe the bytes the client had reported so dashboards
+        // can show "downloads that failed mid-flight were on average
+        // X KiB in" instead of a dimensionless 0.
+        metrics.recordDownload('failed', input.bytesTransferred);
+        throw err;
+      }
     },
     async getStats() {
       return inner.getStats();
