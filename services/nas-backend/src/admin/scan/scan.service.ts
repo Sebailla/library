@@ -8,9 +8,10 @@ import { ScanEventBus } from './scan-event-bus';
  * Name of the BullMQ queue that carries admin scan jobs. The
  * worker side (``workers.module.ts``) reads from the same
  * constant so a typo cannot desync the producer and the
- * consumer.
+ * consumer. Kept distinct from the filesystem-watcher's
+ * ``scan`` queue so the two payload shapes do not collide.
  */
-export const SCAN_QUEUE_NAME = 'scan';
+export const SCAN_QUEUE_NAME = 'admin-scan';
 
 /**
  * String token used to inject the {@link ScanJobProducer} into

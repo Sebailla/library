@@ -2,13 +2,13 @@ import { Logger } from '@nestjs/common';
 import {
   AdminScanWorker,
   buildAdminScanWorkerOptions,
-} from '../../../src/workers/admin-scan.worker';
+} from '../../src/workers/admin-scan.worker';
 import {
   SCAN_REPOSITORY,
-} from '../../../src/admin/scan/scan.repository';
-import { SCAN_JOB_PRODUCER } from '../../../src/admin/scan/scan.service';
-import { ScanEventBus } from '../../../src/admin/scan/scan-event-bus';
-import { ScanProgressEvent, ScanJob } from '../../../src/admin/scan/scan.types';
+} from '../../src/admin/scan/scan.repository';
+import { SCAN_JOB_PRODUCER } from '../../src/admin/scan/scan.service';
+import { ScanEventBus } from '../../src/admin/scan/scan-event-bus';
+import { ScanProgressEvent, ScanJob } from '../../src/admin/scan/scan.types';
 
 /**
  * Contract tests for {@link AdminScanWorker} (PR-N4).
@@ -78,6 +78,13 @@ class StubScanRepository {
     return row;
   }
 
+  async setJobError(id: string, error: string): Promise<ScanJob | null> {
+    const row = this.rows.get(id);
+    if (!row) return null;
+    row.error = error;
+    return row;
+  }
+
   async requestCancellation(id: string): Promise<void> {
     const row = this.rows.get(id);
     if (row) row.cancelled = true;
@@ -91,7 +98,7 @@ class StubScanRepository {
 }
 
 function buildWorker(opts: {
-  files: string[];
+  files?: string[];
   processFile?: (
     path: string,
   ) => Promise<unknown>;
@@ -100,14 +107,19 @@ function buildWorker(opts: {
 } = {}) {
   const repo = opts.repo ?? new StubScanRepository();
   const bus = opts.bus ?? new ScanEventBus();
-  const worker = new AdminScanWorker({
-    repo: repo as never,
+  const processFile =
+    opts.processFile ?? (async () => undefined);
+  const discoverFiles = async () => opts.files ?? [];
+  // The NestJS DI graph is bypassed in tests; inject the
+  // collaborators directly via the protected constructor
+  // surface (a manual cast keeps the production wiring
+  // untouched).
+  const worker = new AdminScanWorker(
+    repo as never,
     bus,
-    files: opts.files,
-    processFile:
-      opts.processFile ??
-      (async () => undefined),
-  });
+    processFile,
+    discoverFiles,
+  );
   return { worker, repo, bus };
 }
 

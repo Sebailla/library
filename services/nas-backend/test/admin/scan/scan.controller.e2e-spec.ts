@@ -201,6 +201,13 @@ class InMemoryScanRepository {
     return row;
   }
 
+  async setJobError(id: string, error: string): Promise<ScanJob | null> {
+    const row = this.rows.get(id);
+    if (!row) return null;
+    row.error = error;
+    return row;
+  }
+
   async requestCancellation(id: string): Promise<void> {
     const row = this.rows.get(id);
     if (!row) return;
@@ -255,6 +262,8 @@ async function buildApp(opts: {
     .useValue(libraries)
     .overrideProvider(LIBRARY_BOOK_COUNT)
     .useValue(new InMemoryBookCount())
+    .overrideProvider(LIBRARIES_REPOSITORY)
+    .useValue(libraries)
     .overrideProvider(SCAN_REPOSITORY)
     .useValue(scanRepo)
     .overrideProvider(SCAN_JOB_PRODUCER)

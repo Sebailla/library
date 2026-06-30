@@ -64,5 +64,10 @@ import {
       useClass: PgDeviceLookupAdapter,
     },
   ],
+  // PR-N4 — the admin scan worker (in WorkersModule) needs the
+  // libraries repository to resolve ``library.root_path``. The
+  // re-export keeps the boundary small without forcing every
+  // consumer to import LibrariesModule directly.
+  exports: [LIBRARIES_REPOSITORY],
 })
 export class LibrariesModule {}

@@ -1,11 +1,11 @@
-import { Module } from '@nestjs/common';
+import { Module, forwardRef } from '@nestjs/common';
 import { Queue } from 'bullmq';
 import { Pool } from 'pg';
 import { AuthModule } from '../../auth/auth.module';
 import { DatabaseModule } from '../../database/database.module';
 import { PG_POOL } from '../../database/pg.service';
-import { WorkersModule } from '../../workers/workers.module';
 import { BULLMQ_CONNECTION } from '../../workers/bullmq.config';
+import { WorkersModule } from '../../workers/workers.module';
 import {
   BullMqScanJobProducer,
   ScanJobProducer,
@@ -48,7 +48,17 @@ import {
  * check).
  */
 @Module({
-  imports: [AuthModule, DatabaseModule, WorkersModule],
+  imports: [
+    AuthModule,
+    DatabaseModule,
+    // ``WorkersModule`` is imported via ``forwardRef`` so the
+    // ``BULLMQ_CONNECTION`` token is reachable without forcing
+    // NestJS to resolve the (ScanModule ↔ WorkersModule) cycle
+    // eagerly. ``WorkersModule`` also imports ``ScanModule``
+    // for the repository + event bus, so the forwardRef pair
+    // is what makes the cycle resolve.
+    forwardRef(() => WorkersModule),
+  ],
   controllers: [ScanController],
   providers: [
     ScanEventBus,

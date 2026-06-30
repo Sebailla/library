@@ -74,6 +74,13 @@ export interface ScanRepository {
   getJob(id: string): Promise<ScanJob | null>;
   listJobs(): Promise<ScanJob[]>;
   setJobStatus(id: string, status: ScanJobStatus): Promise<ScanJob | null>;
+  /**
+   * Persist the diagnostic message on a failed job. The HTTP
+   * layer never reads ``error`` other than to surface it in the
+   * status DTO; the worker writes it via this method when a
+   * ``processFile`` call throws.
+   */
+  setJobError(id: string, error: string): Promise<ScanJob | null>;
   updateProgress(
     id: string,
     processedFiles: number,
@@ -181,6 +188,18 @@ export class PgScanRepository implements ScanRepository {
       `UPDATE scan_jobs SET cancelled = TRUE WHERE id = $1`,
       [id],
     );
+  }
+
+  async setJobError(
+    id: string,
+    error: string,
+  ): Promise<ScanJob | null> {
+    const res = await this.pool.query<ScanJobRow>(
+      `UPDATE scan_jobs SET error = $2 WHERE id = $1 RETURNING ${COLUMNS}`,
+      [id, error],
+    );
+    if (res.rowCount === 0) return null;
+    return rowToScanJob(res.rows[0]);
   }
 
   /**

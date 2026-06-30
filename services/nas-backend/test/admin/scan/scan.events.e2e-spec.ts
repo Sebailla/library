@@ -147,6 +147,12 @@ class InMemoryScanRepository {
     if (totalFiles !== null) row.totalFiles = totalFiles;
     return row;
   }
+  async setJobError(id: string, error: string): Promise<unknown> {
+    const row = this.rows.get(id);
+    if (!row) return null;
+    row.error = error;
+    return row;
+  }
   async requestCancellation(id: string): Promise<void> {
     const row = this.rows.get(id);
     if (row) row.cancelled = true;
