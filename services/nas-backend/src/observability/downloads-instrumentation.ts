@@ -11,6 +11,19 @@ import type { DownloadStats } from '../downloads/downloads.repository';
 import type { MetricsService } from './metrics.service';
 
 /**
+ * DI token for the metric-instrumented downloads service.
+ *
+ * Issue #99 — controllers inject this token (NOT
+ * {@link MetricsService} directly) so the "which states fire
+ * which counters" decision lives in ONE place
+ * ({@link instrumentDownloadsService}). Wiring this token in
+ * ``DownloadsModule`` finally turns the otherwise-dead
+ * ``instrumentDownloadsService`` factory into the single
+ * public surface for download metrics.
+ */
+export const INSTRUMENTED_DOWNLOADS_SERVICE = 'INSTRUMENTED_DOWNLOADS_SERVICE';
+
+/**
  * Surface implemented by {@link instrumentDownloadsService}. The
  * adapter mirrors {@link DownloadsService} so call sites swap one
  * for the other with no signature changes.

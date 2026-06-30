@@ -24,14 +24,16 @@ import {
 import {
   CreateDownloadInput,
   CreateDownloadResponse,
-  DownloadsService,
   ListByDeviceResponse,
   TopDevicesForBookResponse,
   UpdateDownloadInput,
   UpdateDownloadResponse,
 } from './downloads.service';
 import { DownloadStats } from './downloads.repository';
-import { METRICS_SERVICE, MetricsService } from '../observability/metrics.service';
+import {
+  INSTRUMENTED_DOWNLOADS_SERVICE,
+  InstrumentedDownloadsService,
+} from '../observability/downloads-instrumentation';
 
 /**
  * Body shape for ``POST /api/downloads``.
@@ -111,16 +113,23 @@ export class UpdateDownloadDto {
  *     paired device. POST and PATCH only operate on the
  *     bearer's own rows; /by-device/:id enforces path-vs-bearer
  *     ownership (4R #42).
+ *
+ * PR-N7 / issue #99 — observability: the controller injects the
+ * ``INSTRUMENTED_DOWNLOADS_SERVICE`` token instead of
+ * ``MetricsService`` directly so the metric-emitting wrapper is
+ * the ONLY call site for ``recordDownload``. Inline calls from
+ * the controller would double-count the started/in_progress/
+ * completed transitions AND skip the ``state="failed"`` series
+ * the adapter emits on throw, so the token is mandatory.
  */
 @Controller({ path: 'api/downloads', version: undefined })
 @UseGuards(JwtAuthGuard)
 export class DownloadsController {
   constructor(
-    private readonly downloadsService: DownloadsService,
+    @Inject(INSTRUMENTED_DOWNLOADS_SERVICE)
+    private readonly downloadsService: InstrumentedDownloadsService,
     @Inject(DEVICES_REPOSITORY)
     private readonly devices: DevicesRepository,
-    @Inject(METRICS_SERVICE)
-    private readonly metrics: MetricsService,
   ) {}
 
   @Post()
@@ -143,10 +152,9 @@ export class DownloadsController {
       ipAddress: ip,
       userAgent: (req.headers as Record<string, string | undefined>)['user-agent'] ?? null,
     };
-    // PR-N7 — record download start BEFORE delegating so the
-    // counter increments even if the service throws (the http
-    // middleware records the failure separately).
-    this.metrics.recordDownload('started', 0);
+    // PR-N7 / issue #99 — delegating to the instrumented
+    // service emits ``state="started"`` (and ``state="failed"``
+    // if the service throws).
     return this.downloadsService.createDownload(input);
   }
 
@@ -174,14 +182,11 @@ export class DownloadsController {
       bytesTransferred: body.bytes_transferred,
       requestingDeviceId: bearerDeviceId,
     };
-    // PR-N7 — record in-progress progress before delegating
-    // (lets Grafana plot "downloads that vanished" deltas), and
-    // record completion only when the body actually flips the
-    // flag.
-    this.metrics.recordDownload('in_progress', body.bytes_transferred);
-    if (body.completed) {
-      this.metrics.recordDownload('completed', body.bytes_transferred);
-    }
+    // PR-N7 / issue #99 — the instrumented service records
+    // ``state="in_progress"`` and ``state="completed"``
+    // (when the body flips the flag) BEFORE delegating, and
+    // ``state="failed"`` if the service throws. The controller
+    // stays shape-only.
     return this.downloadsService.updateDownload(id, input);
   }
 

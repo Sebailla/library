@@ -1109,6 +1109,73 @@ describe('IDOR hardening for /api/downloads (4R review #42)', () => {
     }
   });
 
+  // PR-N7 / issue #99 — downloads instrumentation closure.
+  //
+  // The wire-up: ``DownloadsController`` now injects the
+  // ``INSTRUMENTED_DOWNLOADS_SERVICE`` token, so every PATCH
+  // flows through ``instrumentDownloadsService.updateDownload``,
+  // which records ``state="failed"`` when the inner service
+  // throws. Without this branch the failure rate is permanently
+  // zero in Grafana (issue #99).
+  //
+  // This test:
+  //   - exercises the FORBIDDEN path that the IDOR check raises
+  //     (4R review #42) so we hit a thrown error in the
+  //     instrumented adapter, AND
+  //   - scrapes ``GET /metrics`` to assert the counter is
+  //     bumped. We use the upper-case series regex so extra
+  //     ``downloads_total`` series (e.g. ``started``) are
+  //     ignored — only the ``state="failed"`` family matters
+  //     here.
+  it('records downloads_total{state="failed"} on the 403 IDOR path (issue #99 e2e)', async () => {
+    const { app, books } = await buildApp();
+    try {
+      const book = await seedBook(books, {
+        title: 'FailureTrace',
+        filePath: '/lib/failure.epub',
+      });
+
+      const pairA = await request(app.getHttpServer())
+        .post('/api/auth/pair')
+        .send({ pin: '12345678', device_name: 'DeviceA' })
+        .expect(201);
+      const tokenA = pairA.body.token as string;
+
+      const created = await request(app.getHttpServer())
+        .post('/api/downloads')
+        .set('Authorization', `Bearer ${tokenA}`)
+        .send({ book_id: book.id, file_size_bytes: 4096 })
+        .expect(201);
+      const downloadId = created.body.download_id as number;
+
+      // Pair device B and try to PATCH A's row → service throws
+      // 403 FORBIDDEN (4R #42); the instrumented adapter must
+      // observe ``state="failed"`` before re-throwing.
+      const pairB = await request(app.getHttpServer())
+        .post('/api/auth/pair')
+        .send({ pin: '12345678', device_name: 'DeviceB' })
+        .expect(201);
+      const tokenB = pairB.body.token as string;
+
+      const failed = await request(app.getHttpServer())
+        .patch(`/api/downloads/${downloadId}`)
+        .set('Authorization', `Bearer ${tokenB}`)
+        .send({ completed: true, bytes_transferred: 4096 })
+        .expect(403);
+      expect(failed.body.error.code).toBe('FORBIDDEN');
+
+      const metrics = await request(app.getHttpServer()).get('/metrics').expect(200);
+      // Pull the matching line and parse the trailing integer.
+      const match = metrics.text.match(
+        /^downloads_total\{state="failed"\} (\d+)$/m,
+      );
+      expect(match).not.toBeNull();
+      expect(Number(match![1])).toBeGreaterThanOrEqual(1);
+    } finally {
+      await app.close();
+    }
+  });
+
   it('GET /api/downloads/by-device/:device_id returns 403 when the param does not match the bearer', async () => {
     const { app } = await buildApp();
     try {
