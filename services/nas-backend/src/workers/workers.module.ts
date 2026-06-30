@@ -47,7 +47,6 @@ import { ScanProcessor, SidecarError } from './scan.processor';
 import {
   AdminScanWorker,
   AdminScanJobPayload,
-  buildAdminScanWorkerOptions,
 } from './admin-scan.worker';
 import { instrumentAdminScanWorker } from '../observability/scan-instrumentation';
 import { METRICS_SERVICE, MetricsService } from '../observability/metrics.service';
