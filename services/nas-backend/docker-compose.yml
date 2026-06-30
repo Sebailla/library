@@ -56,9 +56,18 @@ services:
       retries: 10
 
   nas-backend:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    # Pull the published image from Docker Hub instead of building locally.
+    # Multi-arch (linux/amd64 + linux/arm64) is published by
+    # .github/workflows/docker-publish.yml on every v* tag — see
+    # DOCKERHUB_SETUP.md at the repo root for the publish workflow.
+    #
+    # To pin a different version, edit the tag below. To go back to a
+    # fully local build (e.g. for in-place Dockerfile iteration), comment
+    # out the `image:` line and uncomment the `build:` stanza.
+    image: sebailla001/alejandria-nas-bockend:v0.5.1
+    # build:
+    #   context: .
+    #   dockerfile: Dockerfile
     container_name: alejandria-nas-backend
     restart: unless-stopped
     depends_on:
