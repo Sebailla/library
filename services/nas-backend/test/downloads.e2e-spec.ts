@@ -1365,3 +1365,165 @@ describe('PR-N3 admin gate on /api/downloads/*', () => {
     }
   });
 });
+
+/**
+ * PR-N3 — ``GET /api/me/downloads``.
+ *
+ * Caller-scoped download history. The endpoint accepts any paired
+ * device (no admin check) and filters server-side by
+ * ``req.device.deviceId`` so the client cannot ask for another
+ * device's history by passing a different identifier. This is
+ * the privacy boundary on the /me/downloads surface.
+ */
+describe('GET /api/me/downloads', () => {
+  afterEach(() => {
+    restoreEnv();
+  });
+
+  it('returns 401 UNAUTHORIZED without a Bearer token', async () => {
+    const { app } = await buildApp();
+    try {
+      await request(app.getHttpServer())
+        .get('/api/me/downloads')
+        .expect(401);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('returns 200 with the bearer device\'s downloads only (privacy boundary)', async () => {
+    const { app, books, downloads } = await buildApp();
+    try {
+      const book = await seedBook(books, {
+        title: 'Borges',
+        filePath: '/lib/borges.epub',
+      });
+      const pair = await request(app.getHttpServer())
+        .post('/api/auth/pair')
+        .send({ pin: '12345678', device_name: 'Self' })
+        .expect(201);
+      const token = pair.body.token as string;
+      const bearerDeviceId = pair.body.device_id as string;
+      const other = 'dddddddd-dddd-dddd-dddd-dddddddddddd';
+
+      // One bearer-owned download via HTTP (server attributes
+      // it to the bearer's device).
+      await request(app.getHttpServer())
+        .post('/api/downloads')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ book_id: book.id, file_size_bytes: 100 })
+        .expect(201);
+      // A row belonging to a DIFFERENT device, injected via the
+      // repository. The bearer MUST NOT see it on /me/downloads.
+      await downloads.insert({
+        bookId: book.id,
+        deviceId: other,
+        deviceName: 'Other',
+        fileSizeBytes: 999,
+      });
+
+      const res = await request(app.getHttpServer())
+        .get('/api/me/downloads')
+        .set('Authorization', `Bearer ${token}`)
+        .expect(200);
+      const data = res.body.data as Array<{
+        device_id: string;
+      }>;
+      expect(data).toHaveLength(1);
+      expect(data[0]?.device_id).toBe(bearerDeviceId);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('returns 200 with empty data for a bearer with no downloads', async () => {
+    const { app } = await buildApp();
+    try {
+      const pair = await request(app.getHttpServer())
+        .post('/api/auth/pair')
+        .send({ pin: '12345678', device_name: 'Empty' })
+        .expect(201);
+      const token = pair.body.token as string;
+      const res = await request(app.getHttpServer())
+        .get('/api/me/downloads')
+        .set('Authorization', `Bearer ${token}`)
+        .expect(200);
+      expect(res.body.data).toEqual([]);
+    } finally {
+      await app.close();
+    }
+  });
+});
+
+/**
+ * PR-N3 — privacy check on ``GET /api/downloads/by-device/:device_id``.
+ *
+ * The endpoint is OPEN to every paired device, but the path param
+ * MUST equal the bearer's device. A mismatch returns 403
+ * ``FORBIDDEN`` so a paired (but unprivileged) device cannot ask
+ * for another device's download history by passing a different
+ * ``device_id``. The check already exists from 4R #42; this
+ * describe block adds triangulation coverage (3 positive /
+ * negative combinations) so the contract is locked.
+ */
+describe('PR-N3 privacy check on GET /api/downloads/by-device/:device_id', () => {
+  afterEach(() => {
+    restoreEnv();
+  });
+
+  it('returns 403 FORBIDDEN when the path param does not match the bearer', async () => {
+    const { app } = await buildApp();
+    try {
+      const token = await pairAndGetToken(app);
+      const pair = await request(app.getHttpServer())
+        .post('/api/auth/pair')
+        .send({ pin: '12345678', device_name: 'DeviceB' })
+        .expect(201);
+      const deviceB = pair.body.device_id as string;
+      const res = await request(app.getHttpServer())
+        .get(`/api/downloads/by-device/${deviceB}`)
+        .set('Authorization', `Bearer ${token}`)
+        .expect(403);
+      expect(res.body.error.code).toBe('FORBIDDEN');
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('returns 200 when the path param matches the bearer', async () => {
+    const { app } = await buildApp();
+    try {
+      const pair = await request(app.getHttpServer())
+        .post('/api/auth/pair')
+        .send({ pin: '12345678', device_name: 'Self' })
+        .expect(201);
+      const ownDeviceId = pair.body.device_id as string;
+      const token = pair.body.token as string;
+      const res = await request(app.getHttpServer())
+        .get(`/api/downloads/by-device/${ownDeviceId}`)
+        .set('Authorization', `Bearer ${token}`)
+        .expect(200);
+      expect(Array.isArray(res.body.data)).toBe(true);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('returns 403 even when the path param is a syntactically-valid but unknown UUID', async () => {
+    // A bearer with a valid token MUST NOT be able to query an
+    // arbitrary device_id that is not its own — even if no row
+    // exists for it. The check fires on identity mismatch, not
+    // on lookup result.
+    const { app } = await buildApp();
+    try {
+      const token = await pairAndGetToken(app);
+      const res = await request(app.getHttpServer())
+        .get('/api/downloads/by-device/00000000-0000-0000-0000-000000000000')
+        .set('Authorization', `Bearer ${token}`)
+        .expect(403);
+      expect(res.body.error.code).toBe('FORBIDDEN');
+    } finally {
+      await app.close();
+    }
+  });
+});
