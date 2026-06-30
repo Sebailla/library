@@ -15,6 +15,7 @@ import { FilesModule } from './files/files.module';
 import { LibrariesModule } from './libraries/libraries.module';
 import { ScanModule } from './admin/scan/scan.module';
 import { ObservabilityModule } from './observability/observability.module';
+import { OrganizeModule } from './admin/organize/organize.module';
 
 /**
  * Reshape {@link ThrottlerException} into the project's standard
@@ -93,6 +94,12 @@ class ThrottlerExceptionFilter implements ExceptionFilter {
  * mounted in ``main.ts`` and by the scan / downloads business
  * code paths.
  *
+ * PR-N5 adds the ``OrganizeModule`` which exposes the
+ * ``/api/admin/organize/*`` HTTP surface — admin-only analyze
+ * (proposed paths for a folder) and execute (idempotent
+ * fs.rename with skip-on-target-exists semantics). Reuses the
+ * same ``ScanAdminGuard`` so the same role escalation applies.
+ *
  * Rate limiting (#34, 4R review): ``ThrottlerModule`` is
  * registered with three named buckets (see ``throttlers`` array
  * below) and the ``ThrottlerGuard`` is bound as a global APP_GUARD
@@ -130,6 +137,7 @@ class ThrottlerExceptionFilter implements ExceptionFilter {
     LibrariesModule,
     ScanModule,
     ObservabilityModule,
+    OrganizeModule,
   ],
   providers: [
     {
