@@ -143,7 +143,7 @@ nuevas.
 
 | Comando            | Qué hace                                                     |
 |--------------------|--------------------------------------------------------------|
-| `npm test`         | Ejecuta la suite de vitest (40 tests en 7 archivos).         |
+| `npm test`         | Ejecuta la suite unitaria + de integración de vitest (64 tests en 12 archivos). |
 | `npm run typecheck`| `tsc --noEmit` contra el tsconfig completo.                  |
 | `npm run build`    | Compila `src/*.ts` a `dist/*.js` (input para electron-forge).|
 | `npm run dev`      | Arranca Electron en modo dev (carga `http://localhost:3001`).|
@@ -151,6 +151,8 @@ nuevas.
 | `npm run package`  | `electron-forge package` — produce un build mac sin firmar.  |
 | `npm run make`     | `electron-forge make` — produce un artefacto DMG + ZIP.      |
 | `npm run dist`     | `electron-builder --mac` — produce un DMG codesigned y notarizado (ver `BUILD.md`). |
+| `npm run dist:mac:sign`  | `apps/mac/scripts/sign-and-notarize.sh` — codesign + `notarytool submit --wait` de producción. |
+| `npm run dist:mac:unsigned` | `electron-builder --mac … --publish never` — codesign + DMG sin tocar GitHub Releases. |
 
 Para que `npm run dev` / `npm run start` sea útil, arrancá el
 servidor de desarrollo de Next.js en otra terminal primero:
@@ -226,9 +228,11 @@ original del sidecar.
 
 ## Plan de tests
 
-- `npm test` — 40 tests unitarios cubriendo `preload`,
-  `sidecar-manager`, `ipc-handlers`, `sidecar-client`,
-  `electron-builder`, `npmrc`, y `verify-dist`.
+- `npm test` — suite unitaria + de integración de vitest (64 tests
+  cubriendo `preload`, `sidecar-manager`, `ipc-handlers`,
+  `sidecar-client`, `electron-builder`, `npmrc`, `verify-dist`,
+  `downloader`, `syncer`, `sidecar.end-to-end`, `updater`, y
+  `sign-and-notarize`).
 - `npm run build` — `tsc -p tsconfig.build.json` compila
   `src/*.ts` → `dist/*.js` sin errores.
 - `npm run start` — arranca Electron en modo dev y carga
@@ -243,8 +247,16 @@ auto-update).
 
 ## Estado
 
-Scaffold de PR-4D. El downloader y el syncer son stubs que
-devuelven `{ ok: true, transport: 'stub' }`; un PR futuro los
-cableará a las implementaciones reales. El pipeline de
-codesign + notaría está documentado pero todavía no se ejecutó de
-principio a fin en un runner.
+PR-N8 — integraciones IPC reales. El downloader (`src/downloader.ts`)
+golpea el NAS por `fetch` nativo contra los cuatro endpoints que usa
+`apps/web` (`listBooks`, `startDownload`, `downloadFile`,
+`completeDownload`). El syncer (`src/syncer.ts`) vigila el directorio
+del contenedor `iCloud~com~alejandria~app/` vía chokidar, con `pull()`
+que lee el directorio al arrancar y eventos `change` disparados por
+cada escritura. El auto-updater (`src/updater.ts`) lee
+`process.env.GH_TOKEN` al momento de la llamada para que CI pueda
+rotar el secreto entre invocaciones, y degrada a un no-op cuando
+`app.isPackaged === false`. El script de codesign + notaría
+(`scripts/sign-and-notarize.sh`) usa `xcrun notarytool submit --wait`
+para que el script sólo retorne 0 después de que Apple haya firmado
+el binario.
