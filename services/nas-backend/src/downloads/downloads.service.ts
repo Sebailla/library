@@ -43,6 +43,24 @@ export interface ListByDeviceResponse {
   }>;
 }
 
+/**
+ * PR-N3 — Result returned by ``GET /api/downloads/by-book/:book_id``.
+ *
+ * Top-N devices that have downloaded the given book, ordered by
+ * download count DESC and ``device_id`` ASC for ties. ``last_downloaded_at``
+ * is the most recent ``downloaded_at`` for the (device, book) pair
+ * — useful for the admin dashboard to spot stale vs active readers.
+ */
+export interface TopDevicesForBookResponse {
+  book_id: number;
+  top_devices: Array<{
+    device_id: string;
+    device_name: string | null;
+    count: number;
+    last_downloaded_at: string;
+  }>;
+}
+
 /** Inputs to ``createDownload``. */
 export interface CreateDownloadInput {
   bookId: number;
@@ -163,6 +181,23 @@ export class DownloadsService {
   /** Aggregated download statistics powering ``GET /api/downloads/stats``. */
   async getStats(): Promise<DownloadStats> {
     return this.downloads.stats();
+  }
+
+  /**
+   * PR-N3 — top devices that downloaded a given book.
+   *
+   * Default limit is ``10`` so the admin endpoint stays cheap
+   * even on a heavily-shared book. The full implementation lands
+   * in the next commit (Fake It for now so the controller
+   * compiles); until then the endpoint returns an empty list.
+   */
+  async topDevicesForBook(
+    bookId: number,
+    limit: number = 10,
+  ): Promise<TopDevicesForBookResponse> {
+    void bookId;
+    void limit;
+    return { book_id: bookId, top_devices: [] };
   }
 
   /** Newest-first history of every download for a given device. */

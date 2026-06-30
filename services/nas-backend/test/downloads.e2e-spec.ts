@@ -331,6 +331,62 @@ async function buildApp(opts: {
   return { app, downloads, books };
 }
 
+/**
+ * PR-N3 — build an app where a paired device can be promoted to
+ * admin AFTER pairing. The default ``InMemoryDevicesRepository``
+ * returns ``false`` for ``isAdmin`` (matching the migration's
+ * default), so most tests stay non-admin. The two tests that
+ * exercise the admin gate opt in via ``promoteToAdmin``.
+ */
+async function buildAppWithAdminFlag(): Promise<{
+  app: INestApplication;
+  downloads: InMemoryDownloadsRepository;
+  books: InMemoryBooksRepository;
+  promoteToAdmin: (deviceId: string) => void;
+}> {
+  setEnv({
+    NAS_PAIR_PIN: '12345678',
+    NAS_PIN_TTL_DAYS: '30',
+    NAS_JWT_SECRET: 'test-secret-do-not-use-in-prod-must-be-32+bytes',
+    NAS_JWT_TTL_HOURS: '24',
+  });
+  const devices = new InMemoryDevicesRepository();
+  const adminSet = new Set<string>();
+  (devices as unknown as {
+    isAdmin: (id: string) => Promise<boolean>;
+  }).isAdmin = async (id: string) => adminSet.has(id);
+
+  const books = new InMemoryBooksRepository();
+  const categories = new InMemoryCategoriesRepository();
+  const sagas = new InMemorySagasRepository();
+  const downloads = new InMemoryDownloadsRepository();
+  const moduleRef: TestingModule = await Test.createTestingModule({
+    imports: [AppModule],
+  })
+    .overrideProvider(DEVICES_REPOSITORY)
+    .useValue(devices)
+    .overrideProvider(BOOKS_REPOSITORY)
+    .useValue(books)
+    .overrideProvider(CATEGORIES_REPOSITORY)
+    .useValue(categories)
+    .overrideProvider(SAGAS_REPOSITORY)
+    .useValue(sagas)
+    .overrideProvider(DOWNLOADS_REPOSITORY)
+    .useValue(downloads)
+    .compile();
+  const app = moduleRef.createNestApplication();
+  app.useGlobalPipes(buildValidationPipe());
+  await app.init();
+  return {
+    app,
+    downloads,
+    books,
+    promoteToAdmin: (deviceId: string) => {
+      adminSet.add(deviceId);
+    },
+  };
+}
+
 async function pairAndGetToken(app: INestApplication): Promise<string> {
   const pair = await request(app.getHttpServer())
     .post('/api/auth/pair')
@@ -629,7 +685,14 @@ describe('GET /api/downloads/stats', () => {
   });
 
   it('returns aggregated counts with top_books and top_devices', async () => {
-    const { app, books, downloads } = await buildApp();
+    // PR-N3 — ``/stats`` is admin-only. The test pairs, promotes
+    // to admin via the in-memory stub, then exercises the stats
+    // path. The repository is injected directly so we can seed
+    // rows whose ``device_id`` is NOT the bearer (the bearer is
+    // not allowed to write rows for another device through the
+    // HTTP path after 4R #42, so the seed goes through the
+    // repository directly).
+    const { app, books, downloads, promoteToAdmin } = await buildAppWithAdminFlag();
     try {
       const book1 = await seedBook(books, {
         title: 'A',
@@ -639,7 +702,13 @@ describe('GET /api/downloads/stats', () => {
         title: 'B',
         filePath: '/lib/b.epub',
       });
-      const token = await pairAndGetToken(app);
+      const pair = await request(app.getHttpServer())
+        .post('/api/auth/pair')
+        .send({ pin: '12345678', device_name: 'Admin' })
+        .expect(201);
+      const adminDeviceId = pair.body.device_id as string;
+      const token = pair.body.token as string;
+      promoteToAdmin(adminDeviceId);
       const deviceA = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
       const deviceB = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb';
 
@@ -1024,51 +1093,15 @@ describe('PR-N3 admin gate on /api/downloads/*', () => {
   });
 
   /**
-   * Build an app whose ``DEVICES_REPOSITORY`` reports every
-   * device as a non-admin (default) — the test that needs the
-   * admin path overrides the stub further down.
+   * PR-N3 — admin gate tests reuse the top-level
+   * ``buildAppWithAdminFlag`` helper above. The auth gate is a
+   * controller-level concern (NOT a service-layer one) so it
+   * tests the whole HTTP surface end-to-end via the
+   * ``InMemoryDevicesRepository`` override.
    */
-  async function buildAppWithAdminFlag(
-    adminDeviceIds: Set<string>,
-  ): Promise<{ app: INestApplication; books: InMemoryBooksRepository }> {
-    setEnv({
-      NAS_PAIR_PIN: '12345678',
-      NAS_PIN_TTL_DAYS: '30',
-      NAS_JWT_SECRET: 'test-secret-do-not-use-in-prod-must-be-32+bytes',
-      NAS_JWT_TTL_HOURS: '24',
-    });
-    const devices = new InMemoryDevicesRepository();
-    // Replace ``isAdmin`` on the in-process instance so the
-    // production ``JwtAuthGuard`` can flip the flag for the
-    // devices we opt-in.
-    (devices as unknown as {
-      isAdmin: (id: string) => Promise<boolean>;
-    }).isAdmin = async (id: string) => adminDeviceIds.has(id);
-
-    const books = new InMemoryBooksRepository();
-    const downloads = new InMemoryDownloadsRepository();
-    const moduleRef: TestingModule = await Test.createTestingModule({
-      imports: [AppModule],
-    })
-      .overrideProvider(DEVICES_REPOSITORY)
-      .useValue(devices)
-      .overrideProvider(BOOKS_REPOSITORY)
-      .useValue(books)
-      .overrideProvider(CATEGORIES_REPOSITORY)
-      .useValue(new InMemoryCategoriesRepository())
-      .overrideProvider(SAGAS_REPOSITORY)
-      .useValue(new InMemorySagasRepository())
-      .overrideProvider(DOWNLOADS_REPOSITORY)
-      .useValue(downloads)
-      .compile();
-    const app = moduleRef.createNestApplication();
-    app.useGlobalPipes(buildValidationPipe());
-    await app.init();
-    return { app, books };
-  }
 
   it('GET /api/downloads/stats returns 403 ADMIN_REQUIRED for a non-admin bearer', async () => {
-    const { app } = await buildAppWithAdminFlag(new Set());
+    const { app } = await buildAppWithAdminFlag();
     try {
       const pair = await request(app.getHttpServer())
         .post('/api/auth/pair')
@@ -1087,7 +1120,7 @@ describe('PR-N3 admin gate on /api/downloads/*', () => {
   });
 
   it('GET /api/downloads/stats returns 200 for an admin bearer', async () => {
-    const { app } = await buildAppWithAdminFlag(new Set());
+    const { app, promoteToAdmin } = await buildAppWithAdminFlag();
     try {
       const pair = await request(app.getHttpServer())
         .post('/api/auth/pair')
@@ -1095,29 +1128,20 @@ describe('PR-N3 admin gate on /api/downloads/*', () => {
         .expect(201);
       const adminDeviceId = pair.body.device_id as string;
       const token = pair.body.token as string;
-      // Re-bind the admin set AFTER pairing so the device row is
-      // already in the in-memory store; ``isAdmin`` is the only
-      // signal that matters for the gate.
-      const { app: app2 } = await buildAppWithAdminFlag(
-        new Set([adminDeviceId]),
-      );
-      try {
-        const res = await request(app2.getHttpServer())
-          .get('/api/downloads/stats')
-          .set('Authorization', `Bearer ${token}`)
-          .expect(200);
-        expect(res.body.total).toBe(0);
-        expect(res.body.completed).toBe(0);
-      } finally {
-        await app2.close();
-      }
+      promoteToAdmin(adminDeviceId);
+      const res = await request(app.getHttpServer())
+        .get('/api/downloads/stats')
+        .set('Authorization', `Bearer ${token}`)
+        .expect(200);
+      expect(res.body.total).toBe(0);
+      expect(res.body.completed).toBe(0);
     } finally {
       await app.close();
     }
   });
 
   it('GET /api/downloads/by-book/:book_id returns 403 ADMIN_REQUIRED for a non-admin bearer', async () => {
-    const { app, books } = await buildAppWithAdminFlag(new Set());
+    const { app, books } = await buildAppWithAdminFlag();
     try {
       const book = await seedBook(books, {
         title: 'Cien años de soledad',
@@ -1139,7 +1163,7 @@ describe('PR-N3 admin gate on /api/downloads/*', () => {
   });
 
   it('GET /api/downloads/by-book/:book_id returns 200 + empty top_devices for an admin with no rows', async () => {
-    const { app, books } = await buildAppWithAdminFlag(new Set());
+    const { app, books, promoteToAdmin } = await buildAppWithAdminFlag();
     try {
       const book = await seedBook(books, {
         title: 'Rayuela',
@@ -1151,19 +1175,13 @@ describe('PR-N3 admin gate on /api/downloads/*', () => {
         .expect(201);
       const adminDeviceId = pair.body.device_id as string;
       const token = pair.body.token as string;
-      const { app: app2 } = await buildAppWithAdminFlag(
-        new Set([adminDeviceId]),
-      );
-      try {
-        const res = await request(app2.getHttpServer())
-          .get(`/api/downloads/by-book/${book.id}`)
-          .set('Authorization', `Bearer ${token}`)
-          .expect(200);
-        expect(res.body.book_id).toBe(book.id);
-        expect(res.body.top_devices).toEqual([]);
-      } finally {
-        await app2.close();
-      }
+      promoteToAdmin(adminDeviceId);
+      const res = await request(app.getHttpServer())
+        .get(`/api/downloads/by-book/${book.id}`)
+        .set('Authorization', `Bearer ${token}`)
+        .expect(200);
+      expect(res.body.book_id).toBe(book.id);
+      expect(res.body.top_devices).toEqual([]);
     } finally {
       await app.close();
     }
