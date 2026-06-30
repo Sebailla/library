@@ -102,6 +102,17 @@ class InMemoryDevicesRepository {
     if (row) row.lastSeenAt = new Date();
   }
 
+  /**
+   * PR-N3 — admin gate helper. The default ``false`` matches the
+   * migration's ``DEFAULT FALSE`` so every existing test that does
+   * NOT explicitly opt into admin continues to behave like a
+   * non-admin client. The downloads admin tests inject their own
+   * stub via ``useValue`` to flip the flag.
+   */
+  async isAdmin(deviceId: string): Promise<boolean> {
+    return false;
+  }
+
   async close(): Promise<void> {}
 }
 
@@ -984,3 +995,177 @@ describe('IDOR hardening for /api/downloads (4R review #42)', () => {
 // Type-only re-export so the test can assert the repository contract
 // shape compiled into the production module matches what we mock.
 export type { DownloadsRepository };
+
+/**
+ * PR-N3 — admin gate on the downloads family.
+ *
+ * Spec: ``GET /api/downloads/stats``, ``GET /api/downloads/
+ * by-book/:book_id``, and ``GET /api/me/downloads`` (the
+ * latter open to every paired device) all sit behind the
+ * ``JwtAuthGuard``. The two admin-facing endpoints additionally
+ * require ``device.is_admin = true`` — a non-admin bearer gets
+ * ``403 ADMIN_REQUIRED`` so a paired (but unprivileged) client
+ * cannot read aggregated download telemetry.
+ *
+ * The admin gate lives in the controller (next to the existing
+ * path-vs-bearer privacy check on ``/by-device/:id``) so the
+ * service layer keeps a single responsibility: own the
+ * idempotency / aggregate query. The auth check is a request
+ * concern.
+ *
+ * ``GET /api/me/downloads`` is intentionally OPEN to every paired
+ * device (it lists the bearer's OWN downloads, filtered by
+ * ``req.device.deviceId`` server-side) — there is no admin check
+ * there.
+ */
+describe('PR-N3 admin gate on /api/downloads/*', () => {
+  afterEach(() => {
+    restoreEnv();
+  });
+
+  /**
+   * Build an app whose ``DEVICES_REPOSITORY`` reports every
+   * device as a non-admin (default) — the test that needs the
+   * admin path overrides the stub further down.
+   */
+  async function buildAppWithAdminFlag(
+    adminDeviceIds: Set<string>,
+  ): Promise<{ app: INestApplication; books: InMemoryBooksRepository }> {
+    setEnv({
+      NAS_PAIR_PIN: '12345678',
+      NAS_PIN_TTL_DAYS: '30',
+      NAS_JWT_SECRET: 'test-secret-do-not-use-in-prod-must-be-32+bytes',
+      NAS_JWT_TTL_HOURS: '24',
+    });
+    const devices = new InMemoryDevicesRepository();
+    // Replace ``isAdmin`` on the in-process instance so the
+    // production ``JwtAuthGuard`` can flip the flag for the
+    // devices we opt-in.
+    (devices as unknown as {
+      isAdmin: (id: string) => Promise<boolean>;
+    }).isAdmin = async (id: string) => adminDeviceIds.has(id);
+
+    const books = new InMemoryBooksRepository();
+    const downloads = new InMemoryDownloadsRepository();
+    const moduleRef: TestingModule = await Test.createTestingModule({
+      imports: [AppModule],
+    })
+      .overrideProvider(DEVICES_REPOSITORY)
+      .useValue(devices)
+      .overrideProvider(BOOKS_REPOSITORY)
+      .useValue(books)
+      .overrideProvider(CATEGORIES_REPOSITORY)
+      .useValue(new InMemoryCategoriesRepository())
+      .overrideProvider(SAGAS_REPOSITORY)
+      .useValue(new InMemorySagasRepository())
+      .overrideProvider(DOWNLOADS_REPOSITORY)
+      .useValue(downloads)
+      .compile();
+    const app = moduleRef.createNestApplication();
+    app.useGlobalPipes(buildValidationPipe());
+    await app.init();
+    return { app, books };
+  }
+
+  it('GET /api/downloads/stats returns 403 ADMIN_REQUIRED for a non-admin bearer', async () => {
+    const { app } = await buildAppWithAdminFlag(new Set());
+    try {
+      const pair = await request(app.getHttpServer())
+        .post('/api/auth/pair')
+        .send({ pin: '12345678', device_name: 'Client' })
+        .expect(201);
+      const token = pair.body.token as string;
+      const res = await request(app.getHttpServer())
+        .get('/api/downloads/stats')
+        .set('Authorization', `Bearer ${token}`)
+        .expect(403);
+      expect(res.body.error.code).toBe('ADMIN_REQUIRED');
+      expect(res.body.error.message).toBe('admin role required');
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('GET /api/downloads/stats returns 200 for an admin bearer', async () => {
+    const { app } = await buildAppWithAdminFlag(new Set());
+    try {
+      const pair = await request(app.getHttpServer())
+        .post('/api/auth/pair')
+        .send({ pin: '12345678', device_name: 'Admin' })
+        .expect(201);
+      const adminDeviceId = pair.body.device_id as string;
+      const token = pair.body.token as string;
+      // Re-bind the admin set AFTER pairing so the device row is
+      // already in the in-memory store; ``isAdmin`` is the only
+      // signal that matters for the gate.
+      const { app: app2 } = await buildAppWithAdminFlag(
+        new Set([adminDeviceId]),
+      );
+      try {
+        const res = await request(app2.getHttpServer())
+          .get('/api/downloads/stats')
+          .set('Authorization', `Bearer ${token}`)
+          .expect(200);
+        expect(res.body.total).toBe(0);
+        expect(res.body.completed).toBe(0);
+      } finally {
+        await app2.close();
+      }
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('GET /api/downloads/by-book/:book_id returns 403 ADMIN_REQUIRED for a non-admin bearer', async () => {
+    const { app, books } = await buildAppWithAdminFlag(new Set());
+    try {
+      const book = await seedBook(books, {
+        title: 'Cien años de soledad',
+        filePath: '/lib/cien.epub',
+      });
+      const pair = await request(app.getHttpServer())
+        .post('/api/auth/pair')
+        .send({ pin: '12345678', device_name: 'Client' })
+        .expect(201);
+      const token = pair.body.token as string;
+      const res = await request(app.getHttpServer())
+        .get(`/api/downloads/by-book/${book.id}`)
+        .set('Authorization', `Bearer ${token}`)
+        .expect(403);
+      expect(res.body.error.code).toBe('ADMIN_REQUIRED');
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('GET /api/downloads/by-book/:book_id returns 200 + empty top_devices for an admin with no rows', async () => {
+    const { app, books } = await buildAppWithAdminFlag(new Set());
+    try {
+      const book = await seedBook(books, {
+        title: 'Rayuela',
+        filePath: '/lib/rayuela.epub',
+      });
+      const pair = await request(app.getHttpServer())
+        .post('/api/auth/pair')
+        .send({ pin: '12345678', device_name: 'Admin' })
+        .expect(201);
+      const adminDeviceId = pair.body.device_id as string;
+      const token = pair.body.token as string;
+      const { app: app2 } = await buildAppWithAdminFlag(
+        new Set([adminDeviceId]),
+      );
+      try {
+        const res = await request(app2.getHttpServer())
+          .get(`/api/downloads/by-book/${book.id}`)
+          .set('Authorization', `Bearer ${token}`)
+          .expect(200);
+        expect(res.body.book_id).toBe(book.id);
+        expect(res.body.top_devices).toEqual([]);
+      } finally {
+        await app2.close();
+      }
+    } finally {
+      await app.close();
+    }
+  });
+});
