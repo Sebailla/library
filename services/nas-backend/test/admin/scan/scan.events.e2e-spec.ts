@@ -1,6 +1,8 @@
 import { INestApplication } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import request from 'supertest';
+import * as http from 'http';
+import type { Server } from 'http';
 import { AppModule } from '../../../src/app.module';
 import { DEVICES_REPOSITORY } from '../../../src/auth/devices.repository';
 import { LIBRARIES_REPOSITORY } from '../../../src/libraries/libraries.repository';
@@ -14,6 +16,7 @@ import {
 } from '../../../src/admin/scan/scan.repository';
 import { SCAN_JOB_PRODUCER } from '../../../src/admin/scan/scan.service';
 import { ScanEventBus } from '../../../src/admin/scan/scan-event-bus';
+import { SSE_HEARTBEAT_INTERVAL_MS } from '../../../src/admin/scan/scan.controller';
 
 /**
  * SSE contract tests for ``GET /api/admin/scan/events/:job_id``
@@ -170,6 +173,7 @@ class StubProducer {
 
 async function buildApp(opts: {
   scanRepo?: InMemoryScanRepository;
+  heartbeatIntervalMs?: number;
 } = {}): Promise<{
   app: INestApplication;
   scanRepo: InMemoryScanRepository;
@@ -195,6 +199,8 @@ async function buildApp(opts: {
     .useValue(scanRepo)
     .overrideProvider(SCAN_JOB_PRODUCER)
     .useValue(new StubProducer())
+    .overrideProvider(SSE_HEARTBEAT_INTERVAL_MS)
+    .useValue(opts.heartbeatIntervalMs ?? 25000)
     .compile();
   const app = moduleRef.createNestApplication();
   app.useGlobalPipes(buildValidationPipe());
@@ -290,6 +296,204 @@ describe('GET /api/admin/scan/events/:job_id (SSE)', () => {
       const text = (res as unknown as { body: string }).body ?? (res as unknown as { text: string }).text;
       expect(text).toContain('event: cancelled');
       expect(text).toMatch(/"jobId":"cccccccc-cccc-cccc-cccc-cccccccccccc"/);
+    } finally {
+      await app.close();
+    }
+  });
+
+  /**
+   * Issue #100: the SSE stream must emit a heartbeat frame
+   * (``:keepalive\n\n``) every heartbeat interval so reverse
+   * proxies (nginx, Cloudflare) do not buffer / close an idle
+   * connection. The interval is injected via the
+   * ``SSE_HEARTBEAT_INTERVAL_MS`` provider so this test can
+   * use a 50ms tick instead of waiting the full 25 seconds.
+   *
+   * The test subscribes to a RUNNING job (no terminal replay
+   * path) and tears the connection down after enough ticks to
+   * observe at least one :keepalive frame. The presence of the
+   * heartbeat comment in the response body proves the controller
+   * scheduled the interval — without that production code path,
+   * the response would only contain the HTTP headers and stay
+   * open until the test gave up.
+   */
+  it('emits a :keepalive heartbeat frame on a running-job stream', async () => {
+    const scanRepo = new InMemoryScanRepository();
+    await scanRepo.insertJob({
+      id: 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb',
+      libraryId: null,
+      kind: 'full',
+    });
+    await scanRepo.setJobStatus('bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', 'running');
+    const { app } = await buildApp({
+      scanRepo,
+      heartbeatIntervalMs: 50,
+    });
+    try {
+      const token = await pairAndGetToken(app);
+      // supertest cannot end a streaming response that the server
+      // keeps open; drop down to the raw http client so we can
+      // collect bytes, then destroy the socket after the first
+      // :keepalive frame arrives. A 50ms tick means we expect
+      // the first heartbeat inside ~100ms (one full tick plus
+      // Express/Node scheduling jitter); the 1s safety net
+      // covers slower CI hosts without hanging Jest.
+      await app.listen(0);
+      const server = app.getHttpServer() as Server;
+      const address = server.address();
+      if (!address || typeof address === 'string') {
+        throw new Error('test server has no TCP address');
+      }
+      const text = await new Promise<string>((resolve) => {
+        const req = http.request(
+          {
+            host: '127.0.0.1',
+            port: address.port,
+            path: '/api/admin/scan/events/bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb',
+            method: 'GET',
+            headers: { Authorization: `Bearer ${token}` },
+          },
+          (res) => {
+            let data = '';
+            res.setEncoding('utf8');
+            res.on('data', (chunk: string) => {
+              data += chunk;
+              if (data.includes(':keepalive\n\n')) {
+                req.destroy();
+              }
+            });
+            res.on('end', () => resolve(data));
+            res.on('error', () => resolve(data));
+          },
+        );
+        req.on('error', () => resolve(''));
+        req.end();
+        setTimeout(() => req.destroy(), 1000);
+      });
+      expect(text).toMatch(/:keepalive\n\n/);
+    } finally {
+      await app.close();
+    }
+  });
+
+  /**
+   * Issue #100: the SSE stream must serve the live progress
+   * channel AND close itself when the worker delivers a
+   * terminal event. Concretely:
+   *
+   *   1. Client opens the SSE connection against a running job.
+   *   2. Worker (or test fixture) publishes a `progress` event.
+   *   3. Server writes the corresponding `event: progress\ndata:
+   *      <json>\n\n` frame on the wire.
+   *   4. Worker delivers the terminal `done` event.
+   *   5. Server writes the matching frame and closes the
+   *      response — the client observes an `end` on the
+   *      underlying socket.
+   *
+   * Step 5 is the actual gap (the controller docstring claims
+   * it, but the implementation only closes on `res.on('close')`
+   * or via the already-terminal replay path).
+   */
+  it('delivers a live progress frame and closes on a terminal event', async () => {
+    const scanRepo = new InMemoryScanRepository();
+    await scanRepo.insertJob({
+      id: 'dddddddd-dddd-dddd-dddd-dddddddddddd',
+      libraryId: null,
+      kind: 'full',
+    });
+    await scanRepo.setJobStatus('dddddddd-dddd-dddd-dddd-dddddddddddd', 'running');
+    const { app } = await buildApp({
+      scanRepo,
+      heartbeatIntervalMs: 60_000, // disable heartbeat noise in this test
+    });
+    try {
+      const token = await pairAndGetToken(app);
+      const bus = app.get(ScanEventBus);
+      await app.listen(0);
+      const server = app.getHttpServer() as Server;
+      const address = server.address();
+      if (!address || typeof address === 'string') {
+        throw new Error('test server has no TCP address');
+      }
+
+      // The test resolves once the socket has emitted 'end' OR
+      // 'close' (Node's HTTP client may signal close without a
+      // separate 'end' when the server resets the stream), so a
+      // missing server-side close does not hang Jest past the
+      // safety net.
+      const result = await new Promise<{
+        text: string;
+        ended: boolean;
+      }>((resolve) => {
+        const out = { text: '', ended: false };
+        const req = http.request(
+          {
+            host: '127.0.0.1',
+            port: address.port,
+            path: '/api/admin/scan/events/dddddddd-dddd-dddd-dddd-dddddddddddd',
+            method: 'GET',
+            headers: { Authorization: `Bearer ${token}` },
+          },
+          (res) => {
+            res.setEncoding('utf8');
+            res.on('data', (chunk: string) => {
+              out.text += chunk;
+            });
+            const maybeResolve = (): void => {
+              if (
+                out.text.includes('event: progress') &&
+                out.text.includes('"processed":3') &&
+                out.text.includes('event: done')
+              ) {
+                req.destroy();
+              }
+            };
+            res.on('end', () => {
+              out.ended = true;
+              maybeResolve();
+              resolve(out);
+            });
+            res.on('close', () => {
+              if (!out.ended) out.ended = true;
+              maybeResolve();
+              resolve(out);
+            });
+            res.on('error', () => resolve(out));
+          },
+        );
+        req.on('error', () => resolve(out));
+        req.end();
+
+        // Hand the test fixture a hook to publish events once
+        // the SSE subscription is in place. The 80ms delay is
+        // enough for the controller's `bus.subscribe(...)` call
+        // to have registered before we start emitting.
+        setTimeout(() => {
+          bus.publish('dddddddd-dddd-dddd-dddd-dddddddddddd', {
+            jobId: 'dddddddd-dddd-dddd-dddd-dddddddddddd',
+            type: 'progress',
+            processed: 3,
+            total: 10,
+            timestamp: '2026-06-30T12:00:00Z',
+          });
+          bus.publish('dddddddd-dddd-dddd-dddd-dddddddddddd', {
+            jobId: 'dddddddd-dddd-dddd-dddd-dddddddddddd',
+            type: 'done',
+            processed: 10,
+            total: 10,
+            timestamp: '2026-06-30T12:00:01Z',
+          });
+        }, 80);
+
+        setTimeout(() => {
+          req.destroy();
+          resolve(out);
+        }, 1500);
+      });
+
+      expect(result.text).toMatch(/event: progress\ndata: \{[^}]*"processed":3/);
+      expect(result.text).toMatch(/event: done\ndata: \{[^}]*"processed":10/);
+      expect(result.ended).toBe(true);
     } finally {
       await app.close();
     }

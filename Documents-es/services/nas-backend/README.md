@@ -183,6 +183,22 @@ data: {"jobId":"...","type":"progress","processed":256,"total":1024,"timestamp":
 
 ```
 
+Además de los frames de evento, el servidor emite un frame
+comentario (sin payload) cada 25 segundos:
+
+```
+:keepalive
+
+```
+
+La línea de comentario es la forma que tiene el formato SSE de
+transportar metadata que el cliente debe ignorar (los consumers
+basados en `EventSource` no la exponen). Existe para que los
+reverse proxies (nginx, Cloudflare) no buffereen ni cierren un
+stream SSE idle de larga duración — el `proxy_read_timeout`
+típico es de 60 segundos. La cadencia se controla mediante el
+provider `SSE_HEARTBEAT_INTERVAL_MS` (default 25_000 ms).
+
 El servidor cierra la respuesta cuando:
 
 1. El cliente se desconecta (`res.on('close')`),
@@ -194,6 +210,42 @@ Para un job que ya está en estado terminal cuando un cliente se
 conecta, el controller sintetiza el evento final a partir de la
 fila así los suscriptores tardíos siguen recibiendo un único evento
 determinístico.
+
+#### Contrato SSE (issue #100)
+
+El comportamiento del endpoint SSE está contractualmente fijado
+para la UI admin del iPad. Las cuatro invariantes son:
+
+1. **Replay de estado terminal.** Un cliente que se conecta
+   contra un job que ya está en `done` / `cancelled` / `failed`
+   recibe exactamente un frame terminal sintético derivado de la
+   fila, y el server cierra el stream. El cliente no necesita un
+   `GET /status/:id` extra para conocer el estado final — el
+   endpoint SSE alcanza.
+2. **Sin replay histórico.** El bus no tiene log de replay. Un
+   suscriptor que se une después de que el worker publicó un
+   evento `progress` NO debe ver los ticks pasados — el bus es
+   el canal en vivo, no el audit trail. Los operadores que
+   necesitan la vista histórica leen la fila de `scan_jobs`
+   directamente vía `GET /api/admin/scan/status/:id`.
+3. **Fan-out del progreso en vivo.** Mientras el job está
+   `running`, el controller suscribe la respuesta abierta al
+   bus. Cada evento `progress` que el worker publica se entrega
+   como un frame `event: progress\ndata: <json>\n\n`.
+4. **Cierre en evento terminal.** Cuando el worker entrega un
+   evento `done` / `cancelled` / `failed` en un stream en vivo,
+   el controller escribe el frame correspondiente y cierra la
+   respuesta. Los clientes no tienen que depender de su propio
+   idle timeout para enterarse de que el escaneo terminó. El
+   intervalo de heartbeat de 25 segundos se cancela al mismo
+   tiempo, así el event loop de Node no mantiene al server vivo
+   después del cierre.
+
+En conjunto, estas garantías hacen que un `EventSource` nuevo o
+bien reciba el evento terminal (job ya terminado), o bien
+siga el canal en vivo hasta cerrarse con un evento terminal.
+En cualquier caso el cliente sólo necesita una conexión HTTP
+para conocer el estado final.
 
 ### Cancelación cooperativa
 

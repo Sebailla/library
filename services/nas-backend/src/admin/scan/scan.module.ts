@@ -17,7 +17,11 @@ import {
   SCAN_QUEUE_NAME,
 } from './scan.service';
 import { ScanEventBus } from './scan-event-bus';
-import { ScanController } from './scan.controller';
+import {
+  ScanController,
+  SSE_HEARTBEAT_DEFAULT_MS,
+  SSE_HEARTBEAT_INTERVAL_MS,
+} from './scan.controller';
 import {
   SCAN_REPOSITORY,
   PgScanRepository,
@@ -65,6 +69,14 @@ import {
   controllers: [ScanController],
   providers: [
     ScanEventBus,
+    // Issue #100 — SSE heartbeat cadence. 25s is the production
+    // default; tests override the token via ``overrideProvider``
+    // to drive the interval down to ~50ms for a fast RED-GREEN
+    // cycle.
+    {
+      provide: SSE_HEARTBEAT_INTERVAL_MS,
+      useValue: SSE_HEARTBEAT_DEFAULT_MS,
+    },
     ScanService,
     {
       provide: SCAN_REPOSITORY,
