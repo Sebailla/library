@@ -66,6 +66,10 @@ skipIfNoDb('migration runner', () => {
         '012_libraries.sql',
         '013_device_libraries.sql',
         '014_books_library_id.sql',
+        // PR-N3 — admin flag on paired devices. The downloads admin
+        // endpoints (stats, by-book) gate on ``devices.is_admin``;
+        // see migration 015.
+        '015_devices_is_admin.sql',
       ]),
     );
     // Order must be lexicographic (which equals numeric for fixed-
@@ -95,6 +99,7 @@ skipIfNoDb('migration runner', () => {
         '012_libraries.sql',
         '013_device_libraries.sql',
         '014_books_library_id.sql',
+        '015_devices_is_admin.sql',
       ]),
     );
 
@@ -244,6 +249,29 @@ skipIfNoDb('migration runner', () => {
         'library_id',
       ]);
 
+      // PR-N3 — migration 015 adds ``is_admin`` to ``devices`` so
+      // the admin gate on the downloads endpoints has a stable
+      // signal. The column MUST be ``BOOLEAN`` (not nullable) so
+      // every code path branches on a single concrete value.
+      const deviceAdminCol = await pool.query<{
+        column_name: string;
+        data_type: string;
+        is_nullable: string;
+        column_default: string | null;
+      }>(
+        `SELECT column_name, data_type, is_nullable, column_default
+         FROM information_schema.columns
+         WHERE table_name = 'devices' AND column_name = 'is_admin'`,
+      );
+      expect(deviceAdminCol.rows).toEqual([
+        {
+          column_name: 'is_admin',
+          data_type: 'boolean',
+          is_nullable: 'NO',
+          column_default: 'false',
+        },
+      ]);
+
       // Migration 009 seeds a small bilingual taxonomy. The
       // categories table must contain at least the top-level nodes
       // with their ``name_es`` / ``name_en`` pairs.
@@ -346,6 +374,7 @@ skipIfNoDb('migration runner schema_migrations table (#37)', () => {
           '012_libraries.sql',
           '013_device_libraries.sql',
           '014_books_library_id.sql',
+          '015_devices_is_admin.sql',
         ]),
       );
       // Every applied_at must be a parseable ISO timestamp.

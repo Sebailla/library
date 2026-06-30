@@ -1,0 +1,25 @@
+-- 015_devices_is_admin.sql — add admin flag to paired devices.
+--
+-- PR-N3 closes the NAS backend admin surface. Before this column
+-- every paired device was treated as a plain unprivileged client.
+-- The downloads admin endpoints (``/api/downloads/stats``,
+-- ``/api/downloads/by-book/:book_id``) must only be reachable for
+-- devices with ``is_admin = true``; everyone else gets a 403 with
+-- ``error.code = ADMIN_REQUIRED``.
+--
+-- The default is ``FALSE`` so every existing row is treated as a
+-- non-admin client until an operator promotes it (e.g. a one-off
+-- SQL ``UPDATE devices SET is_admin = TRUE WHERE device_id = ...``
+-- for the NAS admin's iPad). No backfill happens automatically
+-- because there is no concept of "the original pairing device" —
+-- the migration is intentionally conservative.
+--
+-- ``BOOLEAN`` (not nullable) so every code path that reads the
+-- flag has a single concrete value to branch on. A nullable
+-- ``is_admin`` would mean two failure modes (NULL + FALSE) that
+-- must be tested separately.
+--
+-- All statements are idempotent so the runner can re-apply this
+-- file safely.
+
+ALTER TABLE devices ADD COLUMN IF NOT EXISTS is_admin BOOLEAN DEFAULT FALSE;
