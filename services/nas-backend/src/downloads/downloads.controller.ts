@@ -31,6 +31,7 @@ import {
   UpdateDownloadResponse,
 } from './downloads.service';
 import { DownloadStats } from './downloads.repository';
+import { METRICS_SERVICE, MetricsService } from '../observability/metrics.service';
 
 /**
  * Body shape for ``POST /api/downloads``.
@@ -118,11 +119,13 @@ export class DownloadsController {
     private readonly downloadsService: DownloadsService,
     @Inject(DEVICES_REPOSITORY)
     private readonly devices: DevicesRepository,
+    @Inject(METRICS_SERVICE)
+    private readonly metrics: MetricsService,
   ) {}
 
   @Post()
   @HttpCode(HttpStatus.CREATED)
-  create(
+  async create(
     @Body() body: CreateDownloadDto,
     @Req() req: JwtAuthRequest,
     @Ip() ip: string,
@@ -140,12 +143,16 @@ export class DownloadsController {
       ipAddress: ip,
       userAgent: (req.headers as Record<string, string | undefined>)['user-agent'] ?? null,
     };
+    // PR-N7 — record download start BEFORE delegating so the
+    // counter increments even if the service throws (the http
+    // middleware records the failure separately).
+    this.metrics.recordDownload('started', 0);
     return this.downloadsService.createDownload(input);
   }
 
   @Patch(':id')
   @HttpCode(HttpStatus.OK)
-  update(
+  async update(
     @Param('id', ParseIntPipe) id: number,
     @Body() body: UpdateDownloadDto,
     @Req() req: JwtAuthRequest,
@@ -167,6 +174,14 @@ export class DownloadsController {
       bytesTransferred: body.bytes_transferred,
       requestingDeviceId: bearerDeviceId,
     };
+    // PR-N7 — record in-progress progress before delegating
+    // (lets Grafana plot "downloads that vanished" deltas), and
+    // record completion only when the body actually flips the
+    // flag.
+    this.metrics.recordDownload('in_progress', body.bytes_transferred);
+    if (body.completed) {
+      this.metrics.recordDownload('completed', body.bytes_transferred);
+    }
     return this.downloadsService.updateDownload(id, input);
   }
 

@@ -3,6 +3,7 @@ import { Pool } from 'pg';
 import { AuthModule } from '../auth/auth.module';
 import { DatabaseModule } from '../database/database.module';
 import { PG_POOL } from '../database/pg.service';
+import { ObservabilityModule } from '../observability/observability.module';
 import { DownloadsController } from './downloads.controller';
 import {
   DOWNLOADS_REPOSITORY,
@@ -26,11 +27,19 @@ import { DownloadsService } from './downloads.service';
  * the ``JwtAuthGuard`` (which only resolves the bearer, not the
  * role).
  *
+ * PR-N7 (issue #92) — observability: ``DownloadsService`` is
+ * exposed under the ``INSTRUMENTED_DOWNLOADS_SERVICE`` token so
+ * the controller can resolve the metric-instrumenting wrapper
+ * directly. The ``INSTRUMENTED_DOWNLOADS_SERVICE`` factory closes
+ * over the bare ``DownloadsService`` and the
+ * ``METRICS_SERVICE`` so the counter increments happen at the
+ * controller boundary.
+ *
  * Auth is re-used from ``AuthModule`` so the controllers can apply
  * the ``JwtAuthGuard`` directly.
  */
 @Module({
-  imports: [AuthModule, DatabaseModule],
+  imports: [AuthModule, DatabaseModule, ObservabilityModule],
   controllers: [DownloadsController],
   providers: [
     DownloadsService,
@@ -40,6 +49,6 @@ import { DownloadsService } from './downloads.service';
       useFactory: (pool: Pool) => new PgDownloadsRepository(pool),
     },
   ],
-  exports: [DOWNLOADS_REPOSITORY],
+  exports: [DOWNLOADS_REPOSITORY, DownloadsService],
 })
 export class DownloadsModule {}

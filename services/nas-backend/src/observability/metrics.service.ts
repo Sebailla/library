@@ -42,7 +42,7 @@ export type HttpRequestLabels = {
 export type ScanJobStatus = 'queued' | 'running' | 'done' | 'failed' | 'cancelled';
 
 /** Labels for the downloads counter. */
-export type DownloadState = 'started' | 'completed' | 'failed';
+export type DownloadState = 'started' | 'in_progress' | 'completed' | 'failed';
 
 /**
  * Single owner of the prom-client registry for the NAS backend.

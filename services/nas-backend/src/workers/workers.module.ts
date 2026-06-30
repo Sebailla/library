@@ -34,6 +34,9 @@ import {
   AdminScanJobPayload,
   buildAdminScanWorkerOptions,
 } from './admin-scan.worker';
+import { instrumentAdminScanWorker } from '../observability/scan-instrumentation';
+import { METRICS_SERVICE, MetricsService } from '../observability/metrics.service';
+import { ObservabilityModule } from '../observability/observability.module';
 
 /**
  * Recursive walk used by the admin scan worker to enumerate
@@ -191,6 +194,8 @@ export class WorkersBootstrap implements OnModuleInit, OnApplicationShutdown {
     private readonly scanBus: ScanEventBus,
     @Inject(LIBRARIES_REPOSITORY)
     private readonly libraries: LibrariesRepository,
+    @Inject(METRICS_SERVICE)
+    private readonly metrics: MetricsService,
   ) {}
 
   async onModuleInit(): Promise<void> {
@@ -304,15 +309,23 @@ export class WorkersBootstrap implements OnModuleInit, OnApplicationShutdown {
    * through the existing {@link ScanProcessor} so the admin
    * path reuses the same sidecar spawn contract (path
    * sanitization, output cap, retry budget).
+   *
+   * PR-N7 (issue #92) — observability: the bare worker is
+   * wrapped in {@link instrumentAdminScanWorker} so each
+   * terminal transition bumps the
+   * ``scan_jobs_total{status=...}`` counter and the
+   * ``scan_job_duration_seconds`` histogram. The wrapper
+   * re-throws so BullMQ keeps the existing failure handling.
    */
   private async runAdminScan(payload: AdminScanJobPayload): Promise<void> {
-    const worker = new AdminScanWorker(
+    const baseWorker = new AdminScanWorker(
       this.scanRepo,
       this.scanBus,
       async (path) => this.scanProcessor.handle({ path }),
       async (jobId) => this.discoverScanFiles(jobId),
     );
-    await worker.handle(payload);
+    const instrumented = instrumentAdminScanWorker(baseWorker, this.metrics);
+    await instrumented.handle(payload);
   }
 
   /**
@@ -372,7 +385,12 @@ export class WorkersBootstrap implements OnModuleInit, OnApplicationShutdown {
  * serving traffic even when the broker is down.
  */
 @Module({
-  imports: [DownloadsModule, LibrariesModule, forwardRef(() => ScanModule)],
+  imports: [
+    DownloadsModule,
+    LibrariesModule,
+    forwardRef(() => ScanModule),
+    ObservabilityModule,
+  ],
   providers: [
     ScanProcessor,
     DownloadsProcessor,
