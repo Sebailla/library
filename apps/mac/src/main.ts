@@ -1,5 +1,6 @@
 /**
- * Main process entry point for `@alejandria/mac` (PR-4C, issue #75).
+ * Main process entry point for `@alejandria/mac` (PR-4C, issue #75;
+ * PR-N8, issue #94).
  *
  * Wires the four layers of the Electron shell:
  *
@@ -13,6 +14,10 @@
  *   4. The IPC handlers (`./ipc-handlers.ts`) — four channels:
  *      `aleja:download`, `aleja:sync`, `aleja:scan`,
  *      `aleja:version`.
+ *   5. PR-N8: the REAL downloader (`./downloader.ts`), the REAL
+ *      syncer (`./syncer.ts`), and the REAL auto-updater
+ *      (`./updater.ts`). Each satisfies the interfaces the IPC
+ *      layer registered in PR-4C.
  *
  * The sidecar manager (`./sidecar-manager.ts`) is owned by the
  * main process and reused across all `aleja:scan` invocations
@@ -37,6 +42,47 @@ import { join } from 'node:path'
 
 import { registerIpcHandlers, unregisterIpcHandlers } from './ipc-handlers'
 import { SidecarManager } from './sidecar-manager'
+import { createNasDownloader, type NasDownloader } from './downloader'
+import { createIcloudSyncer } from './syncer'
+import { createUpdater } from './updater'
+import { join as pathJoin } from 'node:path'
+import { mkdir } from 'node:fs/promises'
+
+/**
+ * Default destination directory for downloaded books.
+ * Mirrors `apps/mac/README.md → Where your data lives`:
+ * `~/Library/Application Support/alejandria/books/`.
+ *
+ * On a TTY-less test runner the path may not exist; the bridge
+ * creates it on demand.
+ */
+async function defaultDownloadDir(): Promise<string> {
+  const os = await import('node:os')
+  return pathJoin(os.homedir(), 'Library', 'Application Support', 'alejandria', 'books')
+}
+
+/**
+ * Bridge the renderer-facing `downloader.download(bookId)` (which
+ * expects an absolute path was already chosen by the IPC layer)
+ * into the real NAS downloader's `download(bookId, destPath)` API.
+ *
+ * The bridge picks `defaultDownloadDir()` for the destination and
+ * surfaces the completion envelope the NAS returned. We keep the
+ * IPC contract narrow because the renderer is untrusted — moving
+ * the destination decision into the main process is the secure
+ * pattern.
+ */
+function createIpcDownloader(nas: NasDownloader): {
+  download(bookId: string): Promise<unknown>
+} {
+  return {
+    async download(bookId: string): Promise<unknown> {
+      const destDir = await defaultDownloadDir()
+      await mkdir(destDir, { recursive: true })
+      return nas.download(Number(bookId), pathJoin(destDir, `${bookId}.bin`))
+    },
+  }
+}
 
 /** Address the renderer should load. In dev, the Next.js dev server. */
 const DEV_RENDERER_URL = 'http://localhost:3001'
@@ -120,13 +166,22 @@ function createMainWindow(): BrowserWindow {
 let sidecar: SidecarManager | null = null
 
 /**
+ * The iCloud syncer is also a module-level singleton. The
+ * `before-quit` handler closes the chokidar handle so the
+ * libuv loop doesn't keep Electron alive after the last
+ * window closes.
+ */
+let syncerRef: { close: () => Promise<void> } | null = null
+
+/**
  * Bootstrap the shell. The function is intentionally small so
  * its lifecycle is easy to read top-to-bottom:
  *
  *   1. wait for `app.whenReady`
  *   2. create the window
- *   3. register the IPC handlers
- *   4. subscribe to teardown signals
+ *   3. create the sidecar, downloader, syncer, updater
+ *   4. register the IPC handlers
+ *   5. subscribe to teardown signals
  */
 async function bootstrap(): Promise<void> {
   await app.whenReady()
@@ -136,20 +191,25 @@ async function bootstrap(): Promise<void> {
     args: ['-m', 'alejandria_sidecar'],
   })
 
-  // The downloader + syncer services live outside this slice.
-  // PR-4 wires the real implementations; for the scaffold the
-  // IPC layer exposes the contract so the renderer can be
-  // built against it before the services are in place.
-  const downloader = {
-    async download(bookId: string): Promise<unknown> {
-      return { ok: true, bookId, transport: 'stub' as const }
-    },
-  }
-  const syncer = {
-    async sync(direction: 'pull' | 'push'): Promise<unknown> {
-      return { ok: true, direction, transport: 'stub' as const }
-    },
-  }
+  // PR-N8 — real implementations. The downloader hits the NAS
+  // over HTTP; the syncer watches the iCloud Drive folder; the
+  // updater wires `electron-updater` to `process.env.GH_TOKEN`.
+  const baseUrl = process.env['ALEJANDRIA_NAS_URL']
+  const token = process.env['ALEJANDRIA_NAS_TOKEN']
+  const nasDownloader = createNasDownloader(
+    token !== undefined ? { baseUrl, token } : { baseUrl },
+  )
+  const downloader = createIpcDownloader(nasDownloader)
+  const syncer = createIcloudSyncer({})
+  syncerRef = syncer
+  await syncer.pull()
+
+  const updater = await createUpdater()
+  // Wire the updater into a quiet status emitter so the renderer
+  // can subscribe via `window.alejandria` in a follow-up PR.
+  void updater.checkForUpdates().catch(() => {
+    /* dev or no-update — silently ignored */
+  })
 
   registerIpcHandlers({ sidecar, downloader, syncer })
   createMainWindow()
@@ -173,22 +233,30 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', (event) => {
   // If we've already torn down, let the default quit proceed.
-  if (sidecar === null) return
+  if (sidecar === null && syncerRef === null) return
   // Otherwise, intercept the quit, kill the sidecar cleanly,
-  // and let the process exit. The sidecar's SIGTERM→SIGKILL
-  // escalation guarantees we don't block shutdown forever.
+  // close the chokidar handle, and let the process exit. The
+  // sidecar's SIGTERM→SIGKILL escalation guarantees we don't
+  // block shutdown forever.
   event.preventDefault()
-  const ref = sidecar
+  const sidecarRef = sidecar
+  const syncerSave = syncerRef
   sidecar = null
+  syncerRef = null
   unregisterIpcHandlers()
-  ref
-    .kill()
+  void syncerSave
+    ?.close()
     .catch((err: unknown) => {
-      // Surface but don't throw — the user wants to quit.
       // eslint-disable-next-line no-console
-      console.error('[mac] failed to kill sidecar during quit', err)
+      console.error('[mac] failed to close syncer during quit', err)
     })
-    .finally(() => {
+    .finally(async () => {
+      try {
+        await sidecarRef?.kill()
+      } catch (err: unknown) {
+        // eslint-disable-next-line no-console
+        console.error('[mac] failed to kill sidecar during quit', err)
+      }
       app.exit(0)
     })
 })
