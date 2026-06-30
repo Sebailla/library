@@ -4,7 +4,10 @@ import { Pool } from 'pg';
 import { AuthModule } from '../../auth/auth.module';
 import { DatabaseModule } from '../../database/database.module';
 import { PG_POOL } from '../../database/pg.service';
-import { BULLMQ_CONNECTION } from '../../workers/bullmq.config';
+import {
+  BULLMQ_CONNECTION,
+  getScanProducerDefaultJobOptions,
+} from '../../workers/bullmq.config';
 import { WorkersModule } from '../../workers/workers.module';
 import {
   BullMqScanJobProducer,
@@ -94,12 +97,12 @@ import {
           SCAN_QUEUE_NAME,
           {
             connection: connection as never,
-            defaultJobOptions: {
-              attempts: 3,
-              backoff: { type: 'exponential', delay: 5000 },
-              removeOnComplete: { age: 3600, count: 1000 },
-              removeOnFail: { age: 86400 },
-            },
+            // Issue #98 — the producer and the worker share
+            // ``buildQueueOptions()`` (re-exported from
+            // ``workers.module.ts``) so a retry-budget change
+            // picks up both sides; no literal retry values are
+            // duplicated here.
+            defaultJobOptions: getScanProducerDefaultJobOptions(),
           },
         );
         return new BullMqScanJobProducer(queue);

@@ -1,9 +1,14 @@
+// Producer-side import (the worker wiring's canonical factory
+// is re-exported from ``workers.module.ts`` for back-compat;
+// the producer-side helper lives next to the rest of the BullMQ
+// plumbing in ``bullmq.config.ts`` so the admin scan module can
+// import it without dragging in the workers module).
 import {
   buildQueueOptions,
 } from '../../../src/workers/workers.module';
 import {
   getScanProducerDefaultJobOptions,
-} from '../../../src/admin/scan/scan.module';
+} from '../../../src/workers/bullmq.config';
 
 /**
  * Issue #98 — collapse the BullMQ retry literal duplication.
