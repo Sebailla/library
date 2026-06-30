@@ -211,6 +211,18 @@ export class OrganizeService {
   }
 
   /**
+   * Read-only helpers used by the controller. They delegate to the
+   * repository so the HTTP surface does not duplicate SQL.
+   */
+  async listActions(planId: string): Promise<OrganizeAction[]> {
+    return this.repo.listActions(planId);
+  }
+
+  async getPlan(planId: string): Promise<OrganizePlan | null> {
+    return this.repo.getPlan(planId);
+  }
+
+  /**
    * Reduce the action list to the ids the caller approved. An
    * empty / undefined list means "execute everything in the plan"
    * - the controller passes nothing in the common case where the

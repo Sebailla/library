@@ -165,7 +165,7 @@ export class PgOrganizeRepository implements OrganizeRepository {
        VALUES ($1, $2, $3, $4::JSONB)
        RETURNING ${PLAN_COLUMNS}`,
       [
-        plan.id,
+        plan.planId,
         plan.folderPath,
         plan.dryRun,
         JSON.stringify(summary),

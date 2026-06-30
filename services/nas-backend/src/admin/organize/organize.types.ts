@@ -56,10 +56,10 @@ export interface OrganizeAction {
 
 /**
  * Input shape accepted by {@link OrganizeService.analyze}. The
- * service derives the rest (plan id, action list, summary).
+ * service derives the rest (action list, summary).
  */
 export interface NewOrganizePlan {
-  id: string;
+  planId: string;
   folderPath: string;
   dryRun: boolean;
 }
