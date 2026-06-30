@@ -7,7 +7,18 @@ import {
   Post,
 } from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
+import {
+  ApiBody,
+  ApiCreatedResponse,
+  ApiOperation,
+  ApiTags,
+} from '@nestjs/swagger';
 import { IsString, Length, Matches } from 'class-validator';
+import {
+  ApiUnauthorizedResponse,
+  ApiThrottledResponse,
+  ApiValidationResponse,
+} from '../common/openapi.decorators';
 import { AuthService } from './auth.service';
 
 /** Body shape for ``POST /api/auth/pair``. */
@@ -54,6 +65,7 @@ export interface TokenResponse {
  * not be unbounded, so it is 10/min/IP. Both are documented in
  * ``test/throttler.e2e-spec.ts``.
  */
+@ApiTags('auth')
 @Controller({ path: 'api/auth', version: undefined })
 export class AuthController {
   constructor(private readonly authService: AuthService) {}
@@ -61,6 +73,34 @@ export class AuthController {
   @Post('pair')
   @HttpCode(HttpStatus.CREATED)
   @Throttle({ default: { limit: 5, ttl: 60_000 } })
+  @ApiOperation({
+    summary: 'Pair a new device (mint a JWT)',
+    description:
+      'Exchanges an 8-digit NAS PIN + device name for a short-lived JWT. Public endpoint — the device calls this BEFORE it has any token. Rate-limited to 5 attempts/min/IP (4R #34) because this is the bruteforce target.',
+  })
+  @ApiBody({
+    description: 'Pair credentials',
+    schema: {
+      example: {
+        pin: '12345678',
+        device_name: "sebastian's MacBook Pro",
+      },
+    },
+  })
+  @ApiCreatedResponse({
+    description: 'Paired — JWT returned',
+    schema: {
+      example: {
+        token:
+          'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIuLi4ifQ.signature',
+        expires_at: '2026-06-30T01:00:00.000Z',
+        device_id: '1f6c0d5f-...',
+      },
+    },
+  })
+  @ApiUnauthorizedResponse()
+  @ApiValidationResponse()
+  @ApiThrottledResponse()
   async pair(
     @Body() body: PairDto,
     @Ip() ip: string,
@@ -80,6 +120,33 @@ export class AuthController {
   @Post('refresh')
   @HttpCode(HttpStatus.CREATED)
   @Throttle({ default: { limit: 10, ttl: 60_000 } })
+  @ApiOperation({
+    summary: 'Rotate a JWT (refresh)',
+    description:
+      'Exchanges a near-expiry JWT for a fresh one (rotation). Rate-limited to 10/min/IP because the endpoint is legitimate but should not be unbounded.',
+  })
+  @ApiBody({
+    description: 'Refresh credentials',
+    schema: {
+      example: {
+        token:
+          'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIuLi4ifQ.signature',
+      },
+    },
+  })
+  @ApiCreatedResponse({
+    description: 'Refreshed — new JWT returned',
+    schema: {
+      example: {
+        token:
+          'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIuLi4ifQ.newSignature',
+        expires_at: '2026-06-30T01:30:00.000Z',
+        device_id: '1f6c0d5f-...',
+      },
+    },
+  })
+  @ApiUnauthorizedResponse()
+  @ApiThrottledResponse()
   async refresh(@Body() body: RefreshDto): Promise<TokenResponse> {
     const issued = await this.authService.refresh({ token: body.token });
     return {
