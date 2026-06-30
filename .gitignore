@@ -53,3 +53,9 @@ Thumbs.db
 /-
 # Local package lockfiles (monorepo install happens at the root)
 packages/**/package-lock.json
+
+# Local tool caches / artifacts (not part of the repo)
+.atl/
+services/**/bin/
+services/**/layout.v4
+services/nas-backend/bin/

@@ -5,33 +5,43 @@ project. Lives alongside the legacy MVP at
 `../biblioteca/` and replaces it incrementally — the MVP stays
 read-only as the reference implementation.
 
+## Latest release
+
+**v0.5.1** (2026-06-30) — NAS backend follow-up fixes (#98 #99 #100). See
+the [GitHub Releases](https://github.com/Sebailla/library/releases)
+for the full changelog. Local user guide: [Documents-es/USER_GUIDE.md](Documents-es/USER_GUIDE.md)
+(in Spanish — the project uses Spanish for end-user docs).
+
 ## Layout
 
 ```
 biblioteca-v2/
 ├── services/
-│   ├── extractors-py/   PR1 — Python sidecar CLI
-│   └── nas-backend/     PR2 — NestJS + Postgres + Redis + workers
+│   ├── extractors-py/   v0.1.0 — Python sidecar CLI (12 extractor wrappers + OCR)
+│   └── nas-backend/     v0.2.0/v0.5.0/v0.5.1 — NestJS + Postgres + Redis + workers + admin surface
 ├── apps/
-│   ├── web/             PR3 — Next.js 16 + React 19 App Router
-│   └── mac/             PR4 — Electron shell wrapping apps/web
+│   ├── web/             v0.3.0 — Next.js 16 + React 19 App Router (browse, search, reader, ISBN, iCloud sync)
+│   └── mac/             v0.4.0/v0.5.0 — Electron 33 shell wrapping apps/web (IPC, codesign, notarize, electron-updater)
 └── packages/
     ├── core/types/      Shared TS types mirroring alejandria/core/models.py
-    └── sidecar/         Shared sidecar spawn + path sanitization (PR-3-fix-B)
+    └── sidecar/         Shared sidecar spawn + path sanitization (used by nas-backend + apps/web)
 ```
 
 ## PR status
 
-| PR | Slice | Status |
-|----|-------|--------|
-| PR1 | Python sidecar (`services/extractors-py/`) | Merged |
-| PR2 | NAS NestJS backend (`services/nas-backend/`) | Merged |
-| PR-3A | Next.js 16 scaffold + RSC catalog browse (`apps/web/`) | Merged |
-| PR-3B | Real local SQLite + FTS5 + scan pipeline + PDF reader (`apps/web/`) | Merged |
-| PR-3C | NAS client + Range-request download + server actions + pdfjs (`apps/web/`) | Merged |
-| PR-4A | 7-layer ISBN resolution pipeline (`apps/web/lib/isbn-resolver/`) | Merged |
-| PR-4B | iCloud Drive activity sync layer (`apps/web/lib/sync/`) | **This PR** |
-| PR4 | Electron shell + iCloud Drive (full PR4) | Pending |
+| PR | Slice | Status | Release |
+|----|-------|--------|---------|
+| PR1 | Python sidecar (`services/extractors-py/`) | Merged | v0.1.0 |
+| PR2 | NAS NestJS backend (`services/nas-backend/`) | Merged | v0.2.0 |
+| PR-3A | Next.js 16 scaffold + RSC catalog browse (`apps/web/`) | Merged | v0.3.0 |
+| PR-3B | Real local SQLite + FTS5 + scan pipeline + PDF reader (`apps/web/`) | Merged | v0.3.0 |
+| PR-3C | NAS client + Range-request download + server actions + pdfjs (`apps/web/`) | Merged | v0.3.0 |
+| PR-4A | 7-layer ISBN resolution pipeline (`apps/web/lib/isbn-resolver/`) | Merged | v0.4.0 |
+| PR-4B | iCloud Drive activity sync layer (`apps/web/lib/sync/`) | Merged | v0.4.0 |
+| PR-4C | Electron 33 shell + preload + IPC (`apps/mac/`) | Merged | v0.4.0 |
+| PR-4D | Production build + codesign + electron-updater (`apps/mac/`) | Merged | v0.4.0 |
+| PR-N1..N8 | NAS backend closure (Range download, multi-library, admin scan, admin organize, OpenAPI, observability, real Mac IPC) | Merged | v0.5.0 |
+| Follow-ups | BullMQ collapse, downloads_total{state=failed}, SSE heartbeat | Merged | v0.5.1 |
 
 ## Running `apps/web/` (PR-3C)
 
@@ -60,6 +70,61 @@ npm run dev    # http://localhost:3001
 | `npm run test:watch` | Vitest in watch mode. |
 | `npm run typecheck` | `tsc --noEmit` against the strict tsconfig. |
 | `npm run lint` | `next lint` via `eslint-config-next`. |
+
+## Running `services/nas-backend/`
+
+The NAS backend is the central catalog, download tracking, and admin surface. It runs in Docker via `docker-compose.yml` (Postgres 16 + pgroonga + Redis + the API).
+
+```bash
+cd services/nas-backend
+docker compose up -d        # postgres + redis + nas-backend
+npm install                  # if running tests locally
+npm run build                # compile TS to dist/
+npm run start:prod           # node dist/main.js on port 3000
+```
+
+### Scripts
+
+| Script | What it does |
+|--------|--------------|
+| `npm run build` | Compile via `nest build` → `dist/` |
+| `npm start` | `nest start` (dev) |
+| `npm run start:dev` | `nest start --watch` (hot-reload) |
+| `npm run start:prod` | `node dist/main.js` (production) |
+| `npm run migrate` | Apply pending SQL migrations (idempotent via `schema_migrations` table) |
+| `npm test` | Jest one-shot run (e2e + repository contracts + observability) |
+| `npm run openapi:generate` | Regenerate the TS SDK client at `clients/ts/api.d.ts` from the live spec |
+| `npm run openapi:check` | CI guard: fails if the generated SDK is out of sync with the live spec |
+
+## Running `services/extractors-py/`
+
+The Python sidecar CLI wraps the 12 MVP extractors and OCR backends. Pin the interpreter to **3.11 ≤ Python < 3.14** (pyobjc-Vision wheel limitation).
+
+```bash
+cd services/extractors-py
+python -m venv .venv && source .venv/bin/activate
+pip install -e .[dev]
+alejandria-sidecar --help
+alejandria-sidecar extract /path/to/book.pdf    # prints JSON envelope
+pytest                                          # 93+ tests
+```
+
+The sidecar is consumed by both the web app (`apps/web/lib/scan/local-pipeline.ts`) and the Electron shell (`apps/mac/src/sidecar-manager.ts`).
+
+## Running `apps/mac/` (Electron)
+
+The Electron 33 shell wraps the web app and adds native capabilities (sidecar spawn, iCloud Drive sync, file system access, auto-update).
+
+```bash
+cd apps/mac
+npm install
+npm start                                  # launch dev mode (loads http://localhost:3001)
+npm run package                             # produce dist/Alejandria.app (macOS only)
+npm run dist:mac:sign                       # codesign + notarize (requires Apple Developer ID)
+npm test                                    # vitest run
+```
+
+See [apps/mac/README.md](apps/mac/README.md) for end-user install + first-run instructions. See [BUILD.md](BUILD.md) for codesign + notarize + GitHub releases publication.
 
 ### Routes
 
