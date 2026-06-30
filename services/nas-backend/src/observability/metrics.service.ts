@@ -1,5 +1,4 @@
 import {
-  Inject,
   Injectable,
   Logger,
   OnApplicationBootstrap,
@@ -88,13 +87,14 @@ export class MetricsService implements OnApplicationBootstrap {
   private readonly downloadBytes: Histogram<'state'>;
 
   /**
-   * Allow tests to pre-instantiate the service without DI by
-   * accepting an optional registry. Production wiring passes no
-   * argument so we create a fresh registry per service instance.
+   * Production wiring instantiates the service once via the
+   * NestJS DI container; tests instantiate it directly with no
+   * arguments. The constructor builds a fresh prom-client
+   * ``Registry`` and registers all six metrics — every call to
+   * ``new MetricsService()`` owns an isolated registry so
+   * parallel test runs do not bleed series into each other.
    */
-  constructor(
-    @Inject(metricsServiceToken) _selfAlias?: never,
-  ) {
+  constructor() {
     this.httpRequestsTotal = new Counter({
       name: 'http_requests_total',
       help: 'Total HTTP requests handled by the NAS backend',

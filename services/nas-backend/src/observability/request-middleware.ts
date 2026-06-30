@@ -24,10 +24,10 @@ const NOT_FOUND_BUCKET = '__not_found__';
 /**
  * Options accepted by {@link buildRequestMiddleware}.
  *
- * The middleware depends on the {@link MetricsService} for the
- * http counter + histogram. The seam is a lazy ``() =>
- * MetricsService`` so tests can inject a stub without wiring
- * the full NestJS DI graph.
+ * ``metrics`` is the {@link MetricsService} slice the middleware
+ * relies on. Production wiring passes the DI-resolved singleton;
+ * tests inject a stub via the same surface. The middleware
+ * resolves it once at construction time so call sites stay flat.
  */
 export interface RequestMiddlewareOptions {
   metrics: Pick<MetricsService, 'recordHttpRequest'>;
