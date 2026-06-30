@@ -278,3 +278,28 @@ The block was reviewed via 4R fan-out (R1 Risk + R2 Readability + R3 Reliability
 - PR #91: feat(nas-backend): OpenAPI spec + Swagger UI + TS SDK client (N6)
 - PR #93: feat(nas-backend): observability — Prometheus metrics + structured logger (N7)
 - PR #95: feat(mac): real IPC integrations + codesign + electron-updater wire (N8)
+
+---
+
+## [0.5.1] — 2026-06-30 — NAS backend follow-up fixes
+
+Patch release of `alejandria-v2`. Three follow-up fixes that the 4R + judgment-day review identified as real issues but not release blockers for v0.5.0.
+
+### Fixed
+
+- **#99 — emit `downloads_total{state="failed"}` on exception path**: wired the previously-dead `INSTRUMENTED_DOWNLOADS_SERVICE` token in `DownloadsModule.providers`. Removed the inline `metrics.recordDownload(...)` calls from `DownloadsController` (which only emitted `started`, `in_progress`, `completed`). The adapter's try/catch now correctly emits the `failed` state on exception. (PR #102)
+- **#98 — collapse scan.module.ts producer literal into `buildQueueOptions()`**: moved the canonical factory into a neutral file `services/nas-backend/src/workers/bullmq.config.ts`, added `getScanProducerDefaultJobOptions()` helper, and removed the dead `buildAdminScanWorkerOptions()` wrapper. Producer and worker retry budgets are now byte-identical by construction. (PR #103)
+- **#100 — SSE heartbeat + e2e test for `/api/admin/scan/events`**: the events endpoint now emits `:keepalive\n\n` every 25 seconds. The endpoint also closes the connection when the worker delivers a terminal event (instead of leaving the client to disconnect). E2E test coverage added. SSE contract documented in README (4 invariants: terminal-state replay, no historical replay, heartbeat semantics, owner verification). (PR #104)
+
+### Stats
+
+- 3 chained PRs merged to develop
+- +1,037 / -115 LOC (counting all 3 follow-ups)
+- 339+ tests passing (no regressions from prior 337)
+- Issues #98, #99, #100 closed
+
+### Pull requests
+
+- PR #102: `fix(nas-backend): emit downloads_total failed state on exception path`
+- PR #103: `refactor(nas-backend): collapse scan.module.ts producer literal into buildQueueOptions()`
+- PR #104: `feat(nas-backend): SSE heartbeat + e2e for /api/admin/scan/events`
