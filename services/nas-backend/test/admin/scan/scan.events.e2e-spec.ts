@@ -14,6 +14,7 @@ import {
 } from '../../../src/admin/scan/scan.repository';
 import { SCAN_JOB_PRODUCER } from '../../../src/admin/scan/scan.service';
 import { ScanEventBus } from '../../../src/admin/scan/scan-event-bus';
+import { SSE_HEARTBEAT_INTERVAL_MS } from '../../../src/admin/scan/scan.controller';
 
 /**
  * SSE contract tests for ``GET /api/admin/scan/events/:job_id``
@@ -170,6 +171,7 @@ class StubProducer {
 
 async function buildApp(opts: {
   scanRepo?: InMemoryScanRepository;
+  heartbeatIntervalMs?: number;
 } = {}): Promise<{
   app: INestApplication;
   scanRepo: InMemoryScanRepository;
@@ -195,6 +197,8 @@ async function buildApp(opts: {
     .useValue(scanRepo)
     .overrideProvider(SCAN_JOB_PRODUCER)
     .useValue(new StubProducer())
+    .overrideProvider(SSE_HEARTBEAT_INTERVAL_MS)
+    .useValue(opts.heartbeatIntervalMs ?? 25000)
     .compile();
   const app = moduleRef.createNestApplication();
   app.useGlobalPipes(buildValidationPipe());
@@ -290,6 +294,56 @@ describe('GET /api/admin/scan/events/:job_id (SSE)', () => {
       const text = (res as unknown as { body: string }).body ?? (res as unknown as { text: string }).text;
       expect(text).toContain('event: cancelled');
       expect(text).toMatch(/"jobId":"cccccccc-cccc-cccc-cccc-cccccccccccc"/);
+    } finally {
+      await app.close();
+    }
+  });
+
+  /**
+   * Issue #100: the SSE stream must emit a heartbeat frame
+   * (``:keepalive\n\n``) every heartbeat interval so reverse
+   * proxies (nginx, Cloudflare) do not buffer / close an idle
+   * connection. The interval is injected via the
+   * ``SSE_HEARTBEAT_INTERVAL_MS`` provider so this test can
+   * use a 50ms tick instead of waiting the full 25 seconds.
+   *
+   * The test subscribes to a RUNNING job (no terminal replay
+   * path) and tears the connection down after enough ticks to
+   * observe at least one :keepalive frame. The presence of the
+   * heartbeat comment in the response body proves the controller
+   * scheduled the interval — without that production code path,
+   * the response would only contain the HTTP headers and stay
+   * open until the test gave up.
+   */
+  it('emits a :keepalive heartbeat frame on a running-job stream', async () => {
+    const scanRepo = new InMemoryScanRepository();
+    await scanRepo.insertJob({
+      id: 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb',
+      libraryId: null,
+      kind: 'full',
+    });
+    await scanRepo.setJobStatus('bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', 'running');
+    const { app } = await buildApp({
+      scanRepo,
+      heartbeatIntervalMs: 50,
+    });
+    try {
+      const token = await pairAndGetToken(app);
+      const res = await request(app.getHttpServer())
+        .get('/api/admin/scan/events/bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb')
+        .set('Authorization', `Bearer ${token}`)
+        .buffer(true)
+        .parse((response, callback) => {
+          let data = '';
+          response.on('data', (chunk) => { data += chunk.toString(); });
+          response.on('end', () => callback(null, data));
+        })
+        .timeout(2000)
+        .expect(200);
+      const text =
+        (res as unknown as { body: string }).body ??
+        (res as unknown as { text: string }).text;
+      expect(text).toMatch(/^:keepalive\n\n/m);
     } finally {
       await app.close();
     }
