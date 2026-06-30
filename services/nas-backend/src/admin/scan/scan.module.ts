@@ -1,0 +1,101 @@
+import { Module } from '@nestjs/common';
+import { Queue } from 'bullmq';
+import { Pool } from 'pg';
+import { AuthModule } from '../../auth/auth.module';
+import { DatabaseModule } from '../../database/database.module';
+import { PG_POOL } from '../../database/pg.service';
+import { WorkersModule } from '../../workers/workers.module';
+import { BULLMQ_CONNECTION } from '../../workers/bullmq.config';
+import {
+  BullMqScanJobProducer,
+  ScanJobProducer,
+  ScanService,
+  SCAN_JOB_PRODUCER,
+  SCAN_QUEUE_NAME,
+} from './scan.service';
+import { ScanEventBus } from './scan-event-bus';
+import { ScanController } from './scan.controller';
+import {
+  SCAN_REPOSITORY,
+  PgScanRepository,
+} from './scan.repository';
+
+/**
+ * Admin scan module — PR-N4.
+ *
+ * Wires:
+ *
+ *   - ``ScanRepository``  — pg-backed CRUD over the ``scan_jobs``
+ *                            table (migration 016).
+ *   - ``ScanService``      — orchestration: persists the row,
+ *                            enqueues the BullMQ job, flips the
+ *                            cooperative cancel flag.
+ *   - ``ScanEventBus``     — per-job topic for SSE progress
+ *                            delivery.
+ *   - ``ScanController``   — the ``/api/admin/scan/*`` HTTP
+ *                            surface (POST/GET/cancel + SSE).
+ *
+ * The BullMQ producer is built from the shared
+ * ``BULLMQ_CONNECTION`` Redis client (see ``bullmq.config.ts``).
+ * If the connection is unavailable (Redis genuinely down) the
+ * producer stub returns successfully without enqueuing — the
+ * ``scan_jobs`` row is still recorded so the admin UI can show
+ * "queued" and the worker can re-trigger once Redis recovers.
+ *
+ * Auth: the controller re-uses ``AuthModule`` for the
+ * ``JwtAuthGuard`` + ``DEVICES_REPOSITORY`` (the
+ * ``ScanAdminGuard`` needs the latter for the ``isAdmin``
+ * check).
+ */
+@Module({
+  imports: [AuthModule, DatabaseModule, WorkersModule],
+  controllers: [ScanController],
+  providers: [
+    ScanEventBus,
+    ScanService,
+    {
+      provide: SCAN_REPOSITORY,
+      inject: [PG_POOL],
+      useFactory: (pool: Pool): PgScanRepository => new PgScanRepository(pool),
+    },
+    {
+      // The producer is the only BullMQ-touching piece inside
+      // the admin module. When ``BULLMQ_CONNECTION`` is null
+      // (test override) we fall back to a no-op stub so the
+      // HTTP layer still records the queued row without trying
+      // to talk to Redis.
+      provide: SCAN_JOB_PRODUCER,
+      inject: [BULLMQ_CONNECTION],
+      useFactory: (
+        connection: import('ioredis').Redis | null,
+      ): ScanJobProducer => {
+        if (!connection) {
+          return {
+            async add() {
+              /* no-op: Redis is down */
+              return null;
+            },
+            async close() {
+              /* no-op */
+            },
+          };
+        }
+        const queue = new Queue<{ jobId: string }>(
+          SCAN_QUEUE_NAME,
+          {
+            connection: connection as never,
+            defaultJobOptions: {
+              attempts: 3,
+              backoff: { type: 'exponential', delay: 5000 },
+              removeOnComplete: { age: 3600, count: 1000 },
+              removeOnFail: { age: 86400 },
+            },
+          },
+        );
+        return new BullMqScanJobProducer(queue);
+      },
+    },
+  ],
+  exports: [ScanService, SCAN_REPOSITORY, SCAN_JOB_PRODUCER, ScanEventBus],
+})
+export class ScanModule {}

@@ -1,6 +1,6 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { Queue } from 'bullmq';
-import { ScanRepository } from './scan.repository';
+import { SCAN_REPOSITORY, ScanRepository } from './scan.repository';
 import { ScanJob, ScanJobKind } from './scan.types';
 import { ScanEventBus } from './scan-event-bus';
 
@@ -11,6 +11,15 @@ import { ScanEventBus } from './scan-event-bus';
  * consumer.
  */
 export const SCAN_QUEUE_NAME = 'scan';
+
+/**
+ * String token used to inject the {@link ScanJobProducer} into
+ * the NestJS DI graph. Lives in this file (not ``scan.module.ts``)
+ * so the service can resolve it without importing the module —
+ * which would otherwise create a circular import (module → service
+ * → module).
+ */
+export const SCAN_JOB_PRODUCER = 'SCAN_JOB_PRODUCER';
 
 /**
  * Minimal producer surface the service depends on. The full
@@ -75,9 +84,10 @@ export class ScanService {
   private readonly logger = new Logger(ScanService.name);
 
   constructor(
-    @Inject('SCAN_REPOSITORY')
+    @Inject(SCAN_REPOSITORY)
     private readonly repo: ScanRepository,
     private readonly bus: ScanEventBus,
+    @Inject(SCAN_JOB_PRODUCER)
     private readonly producer: ScanJobProducer,
   ) {}
 
