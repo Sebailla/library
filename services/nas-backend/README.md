@@ -750,6 +750,22 @@ data: {"jobId":"...","type":"progress","processed":256,"total":1024,"timestamp":
 
 ```
 
+In addition to event frames, the server emits a comment-only
+frame every 25 seconds:
+
+```
+:keepalive
+
+```
+
+The comment line is the SSE wire format's way of carrying
+metadata that the client must ignore (`EventSource` consumers
+do not surface it). It exists so reverse proxies (nginx,
+Cloudflare) do not buffer / close an idle long-running scan
+stream — a typical `proxy_read_timeout` is 60 seconds. The
+cadence is controlled by the `SSE_HEARTBEAT_INTERVAL_MS`
+provider (default 25_000 ms).
+
 The server closes the response when:
 1. The client disconnects (`res.on('close')`),
 2. The job reaches a terminal status — the bus delivers the
@@ -759,6 +775,42 @@ The server closes the response when:
 For a job that is already terminal when a client connects, the
 controller synthesises the final event from the row so late
 subscribers still get a single deterministic event.
+
+#### SSE contract (issue #100)
+
+The SSE endpoint's behaviour is contract-bound for the iPad
+admin UI. The four invariants are:
+
+1. **Terminal-state replay.** A client that connects against
+   a job already in `done` / `cancelled` / `failed` receives
+   exactly one synthetic terminal frame derived from the row,
+   then the server closes the stream. The client does not
+   need a separate `GET /status/:id` poll to know the final
+   state — the SSE endpoint is enough.
+2. **No historical replay.** The bus has no replay log. A
+   subscriber that joins after the worker publishes a
+   `progress` event MUST NOT see past ticks — the bus is the
+   live channel, not the audit trail. Operators that need
+   the historical view read the `scan_jobs` row directly via
+   `GET /api/admin/scan/status/:id`.
+3. **Live progress fan-out.** While the job is `running`, the
+   controller subscribes the open response to the bus. Every
+   `progress` event the worker publishes is delivered as an
+   `event: progress\ndata: <json>\n\n` frame.
+4. **Close on terminal event.** When the worker delivers a
+   `done` / `cancelled` / `failed` event on a live stream,
+   the controller writes the matching frame and closes the
+   response. Clients do not have to rely on their own idle
+   timeout to discover that the scan finished. The 25-second
+   heartbeat interval is cancelled at the same time so the
+   Node event loop does not keep the server alive past the
+   close.
+
+Together these guarantee that a fresh `EventSource` either
+receives the terminal event (job already finished) or follows
+the live channel until it ends with a terminal event. Either
+way the client only needs one HTTP connection to learn the
+final state.
 
 ### Cooperative cancellation
 
