@@ -18,7 +18,29 @@ export const DATABASE_URL =
 
 const repoRootFor = (testDir: string): string => {
   // ``test/repositories/*.spec.ts`` lives two levels under the
-  // service root; ``test/migrations.*.spec.ts`` lives one level.
+  // service root; ``test/migrations.*.spec.ts`` lives one level;
+  // ``test/admin/scan/*.spec.ts`` lives three levels. Walk up
+  // until the parent directory contains a ``migrations`` folder
+  // so every depth is supported without hardcoding the offset.
+  let dir = testDir;
+  // Bound the walk so a typo cannot loop forever.
+  for (let i = 0; i < 6; i++) {
+    const parent = dir.split('/').slice(0, -1).join('/') || dir;
+    if (parent === dir) break;
+    // Heuristic: the service root is the first ancestor that
+    // contains a sibling ``migrations`` directory.
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const fs = require('fs') as typeof import('fs');
+      if (fs.existsSync(`${parent}/migrations`)) {
+        return parent;
+      }
+    } catch {
+      /* ignore — fs errors just mean we keep walking up */
+    }
+    dir = parent;
+  }
+  // Fallback to the historical 2-level offset.
   const segments = testDir.split('/');
   return segments.slice(0, segments.length - 2).join('/') || testDir;
 };
@@ -69,6 +91,24 @@ export async function insertAuthor(
     const res = await client.query<{ id: string }>(
       'INSERT INTO authors (lastname, firstname) VALUES ($1, $2) RETURNING id',
       [lastname, firstname],
+    );
+    return Number(res.rows[0].id);
+  });
+}
+
+/**
+ * Insert a parent library row and return its id. Used by the
+ * PR-N2 contract tests that exercise the new
+ * ``books.library_id`` scoping.
+ */
+export async function insertLibrary(
+  name: string,
+  rootPath: string = `/lib/${name.toLowerCase()}`,
+): Promise<number> {
+  return withClient(async (client) => {
+    const res = await client.query<{ id: string }>(
+      'INSERT INTO libraries (name, root_path) VALUES ($1, $2) RETURNING id',
+      [name, rootPath],
     );
     return Number(res.rows[0].id);
   });

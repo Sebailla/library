@@ -5,6 +5,7 @@ import {
   Get,
   HttpCode,
   HttpStatus,
+  Inject,
   Ip,
   Param,
   ParseIntPipe,
@@ -17,14 +18,20 @@ import { IsInt, IsOptional, Min } from 'class-validator';
 import { Type } from 'class-transformer';
 import { JwtAuthGuard, JwtAuthRequest } from '../auth/jwt-auth.guard';
 import {
+  DEVICES_REPOSITORY,
+  DevicesRepository,
+} from '../auth/devices.repository';
+import {
   CreateDownloadInput,
   CreateDownloadResponse,
   DownloadsService,
   ListByDeviceResponse,
+  TopDevicesForBookResponse,
   UpdateDownloadInput,
   UpdateDownloadResponse,
 } from './downloads.service';
 import { DownloadStats } from './downloads.repository';
+import { METRICS_SERVICE, MetricsService } from '../observability/metrics.service';
 
 /**
  * Body shape for ``POST /api/downloads``.
@@ -61,12 +68,13 @@ export class UpdateDownloadDto {
 }
 
 /**
- * Downloads HTTP module — PR-2E, work unit 1.
+ * Downloads HTTP module — PR-2E, work unit 1, extended PR-N3.
  *
- *   POST  /api/downloads                → DownloadsService.createDownload
- *   PATCH /api/downloads/:id            → DownloadsService.updateDownload
- *   GET   /api/downloads/stats          → DownloadsService.getStats
- *   GET   /api/downloads/by-device/:id  → DownloadsService.listByDevice
+ *   POST  /api/downloads                  → DownloadsService.createDownload
+ *   PATCH /api/downloads/:id              → DownloadsService.updateDownload
+ *   GET   /api/downloads/stats            → DownloadsService.getStats (admin)
+ *   GET   /api/downloads/by-book/:book_id → top devices for a book (admin)
+ *   GET   /api/downloads/by-device/:id    → DownloadsService.listByDevice
  *
  * All endpoints require a valid Bearer token (PR-2C's
  * ``JwtAuthGuard``). The service layer owns the
@@ -89,15 +97,35 @@ export class UpdateDownloadDto {
  *     bearer device and refuses with ``403 FORBIDDEN`` on
  *     mismatch. ``req.device.deviceId`` is the only allowed
  *     value.
+ *
+ * PR-N3 — admin gate:
+ *
+ *   - GET /stats + GET /by-book/:book_id require
+ *     ``device.is_admin = true`` (migration 015). Non-admin
+ *     bearers get ``403 ADMIN_REQUIRED`` so a paired (but
+ *     unprivileged) client cannot read aggregated download
+ *     telemetry. The check is a request concern, so it lives
+ *     next to the controller rather than the service layer.
+ *
+ *   - POST, PATCH, and GET /by-device/:id are OPEN to every
+ *     paired device. POST and PATCH only operate on the
+ *     bearer's own rows; /by-device/:id enforces path-vs-bearer
+ *     ownership (4R #42).
  */
 @Controller({ path: 'api/downloads', version: undefined })
 @UseGuards(JwtAuthGuard)
 export class DownloadsController {
-  constructor(private readonly downloadsService: DownloadsService) {}
+  constructor(
+    private readonly downloadsService: DownloadsService,
+    @Inject(DEVICES_REPOSITORY)
+    private readonly devices: DevicesRepository,
+    @Inject(METRICS_SERVICE)
+    private readonly metrics: MetricsService,
+  ) {}
 
   @Post()
   @HttpCode(HttpStatus.CREATED)
-  create(
+  async create(
     @Body() body: CreateDownloadDto,
     @Req() req: JwtAuthRequest,
     @Ip() ip: string,
@@ -115,12 +143,16 @@ export class DownloadsController {
       ipAddress: ip,
       userAgent: (req.headers as Record<string, string | undefined>)['user-agent'] ?? null,
     };
+    // PR-N7 — record download start BEFORE delegating so the
+    // counter increments even if the service throws (the http
+    // middleware records the failure separately).
+    this.metrics.recordDownload('started', 0);
     return this.downloadsService.createDownload(input);
   }
 
   @Patch(':id')
   @HttpCode(HttpStatus.OK)
-  update(
+  async update(
     @Param('id', ParseIntPipe) id: number,
     @Body() body: UpdateDownloadDto,
     @Req() req: JwtAuthRequest,
@@ -142,12 +174,30 @@ export class DownloadsController {
       bytesTransferred: body.bytes_transferred,
       requestingDeviceId: bearerDeviceId,
     };
+    // PR-N7 — record in-progress progress before delegating
+    // (lets Grafana plot "downloads that vanished" deltas), and
+    // record completion only when the body actually flips the
+    // flag.
+    this.metrics.recordDownload('in_progress', body.bytes_transferred);
+    if (body.completed) {
+      this.metrics.recordDownload('completed', body.bytes_transferred);
+    }
     return this.downloadsService.updateDownload(id, input);
   }
 
   @Get('stats')
-  stats(): Promise<DownloadStats> {
+  async stats(@Req() req: JwtAuthRequest): Promise<DownloadStats> {
+    await this.assertAdmin(req);
     return this.downloadsService.getStats();
+  }
+
+  @Get('by-book/:book_id')
+  async byBook(
+    @Param('book_id', ParseIntPipe) bookId: number,
+    @Req() req: JwtAuthRequest,
+  ): Promise<TopDevicesForBookResponse> {
+    await this.assertAdmin(req);
+    return this.downloadsService.topDevicesForBook(bookId);
   }
 
   @Get('by-device/:device_id')
@@ -165,5 +215,34 @@ export class DownloadsController {
       });
     }
     return this.downloadsService.listByDevice(deviceId);
+  }
+
+  /**
+   * PR-N3 — admin gate. Resolves the bearer's device against the
+   * ``devices.is_admin`` column (migration 015). A missing
+   * ``req.device`` (defensive — ``JwtAuthGuard`` should have
+   * rejected without a device) AND a non-admin row both raise
+   * the same ``403 ADMIN_REQUIRED`` envelope so the wire shape
+   * is stable for clients.
+   */
+  private async assertAdmin(req: JwtAuthRequest): Promise<void> {
+    const bearerDeviceId = req.device?.deviceId;
+    if (!bearerDeviceId) {
+      throw new ForbiddenException({
+        error: {
+          code: 'ADMIN_REQUIRED',
+          message: 'admin role required',
+        },
+      });
+    }
+    const isAdmin = await this.devices.isAdmin(bearerDeviceId);
+    if (!isAdmin) {
+      throw new ForbiddenException({
+        error: {
+          code: 'ADMIN_REQUIRED',
+          message: 'admin role required',
+        },
+      });
+    }
   }
 }

@@ -14,12 +14,15 @@
     "start": "electron-forge start",
     "package": "electron-forge package",
     "make": "electron-forge make",
+    "dist:mac:sign": "./scripts/sign-and-notarize.sh",
+    "dist:mac:unsigned": "electron-builder --mac --config electron-builder.yml --publish never",
     "lint": "eslint src",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest"
   },
   "dependencies": {
+    "chokidar": "^3.6.0",
     "electron-squirrel-startup": "^1.0.1",
     "electron-updater": "^6.3.9"
   },

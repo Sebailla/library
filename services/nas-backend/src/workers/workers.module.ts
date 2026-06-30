@@ -6,10 +6,22 @@ import {
   OnApplicationShutdown,
   OnModuleInit,
   Optional,
+  forwardRef,
 } from '@nestjs/common';
 import { ConnectionOptions, Job, UnrecoverableError, Worker } from 'bullmq';
 import { Redis } from 'ioredis';
+import { readdir, stat } from 'fs/promises';
+import { join } from 'path';
 import { DownloadsModule } from '../downloads/downloads.module';
+import { LibrariesModule } from '../libraries/libraries.module';
+import { ScanModule } from '../admin/scan/scan.module';
+import { SCAN_QUEUE_NAME } from '../admin/scan/scan.service';
+import { SCAN_REPOSITORY, ScanRepository } from '../admin/scan/scan.repository';
+import { ScanEventBus } from '../admin/scan/scan-event-bus';
+import {
+  LIBRARIES_REPOSITORY,
+  LibrariesRepository,
+} from '../libraries/libraries.repository';
 import { BULLMQ_CONNECTION, buildBullMqConnection } from './bullmq.config';
 import {
   DOWNLOADS_QUEUE_NAME,
@@ -17,6 +29,52 @@ import {
   DownloadsProcessor,
 } from './downloads.processor';
 import { ScanProcessor, SidecarError } from './scan.processor';
+import {
+  AdminScanWorker,
+  AdminScanJobPayload,
+  buildAdminScanWorkerOptions,
+} from './admin-scan.worker';
+import { instrumentAdminScanWorker } from '../observability/scan-instrumentation';
+import { METRICS_SERVICE, MetricsService } from '../observability/metrics.service';
+import { ObservabilityModule } from '../observability/observability.module';
+
+/**
+ * Recursive walk used by the admin scan worker to enumerate
+ * the files inside a library's ``root_path``. Best-effort:
+ * unreadable directories yield ``[]`` rather than throwing so
+ * a corrupt library never halts the queue head.
+ */
+async function walkLibrary(rootPath: string): Promise<string[]> {
+  const out: string[] = [];
+  async function visit(dir: string): Promise<void> {
+    let entries;
+    try {
+      entries = await readdir(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const full = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        await visit(full);
+      } else if (entry.isFile()) {
+        out.push(full);
+      } else {
+        // Symlink / socket / etc — peek, treat symlink-to-file
+        // as a file (the sidecar spawn contract rejects the
+        // rest).
+        try {
+          const s = await stat(full);
+          if (s.isFile()) out.push(full);
+        } catch {
+          /* skip */
+        }
+      }
+    }
+  }
+  await visit(rootPath);
+  return out;
+}
 
 /**
  * Wire-format for jobs enqueued on the ``scan`` queue. The actual
@@ -131,6 +189,13 @@ export class WorkersBootstrap implements OnModuleInit, OnApplicationShutdown {
     @Optional() @Inject(BULLMQ_CONNECTION) private readonly connection: Redis | null,
     private readonly scanProcessor: ScanProcessor,
     private readonly downloadsProcessor: DownloadsProcessor,
+    @Inject(SCAN_REPOSITORY)
+    private readonly scanRepo: ScanRepository,
+    private readonly scanBus: ScanEventBus,
+    @Inject(LIBRARIES_REPOSITORY)
+    private readonly libraries: LibrariesRepository,
+    @Inject(METRICS_SERVICE)
+    private readonly metrics: MetricsService,
   ) {}
 
   async onModuleInit(): Promise<void> {
@@ -187,10 +252,22 @@ export class WorkersBootstrap implements OnModuleInit, OnApplicationShutdown {
           removeOnFail: queueOpts.removeOnFail,
         },
       );
+      const adminScan = new Worker<AdminScanJobPayload, unknown>(
+        SCAN_QUEUE_NAME,
+        makeResilientProcessor<AdminScanJobPayload>(async (job) =>
+          this.runAdminScan(job.data),
+        ),
+        {
+          connection: conn,
+          removeOnComplete: queueOpts.removeOnComplete,
+          removeOnFail: queueOpts.removeOnFail,
+        },
+      );
       this.workers.push({ name: 'scan', worker: scan });
       this.workers.push({ name: DOWNLOADS_QUEUE_NAME, worker: downloads });
+      this.workers.push({ name: SCAN_QUEUE_NAME, worker: adminScan });
       this.logger.log(
-        `started 2 BullMQ workers on queue=scan, ${DOWNLOADS_QUEUE_NAME}`,
+        `started 3 BullMQ workers on queue=scan, ${DOWNLOADS_QUEUE_NAME}, ${SCAN_QUEUE_NAME}`,
       );
     } catch (err) {
       this.logger.warn(
@@ -224,6 +301,48 @@ export class WorkersBootstrap implements OnModuleInit, OnApplicationShutdown {
       }
       return false;
     }
+  }
+
+  /**
+   * PR-N4 — handle one admin scan job end-to-end. The worker
+   * discovers the file list, walks it, and bridges each file
+   * through the existing {@link ScanProcessor} so the admin
+   * path reuses the same sidecar spawn contract (path
+   * sanitization, output cap, retry budget).
+   *
+   * PR-N7 (issue #92) — observability: the bare worker is
+   * wrapped in {@link instrumentAdminScanWorker} so each
+   * terminal transition bumps the
+   * ``scan_jobs_total{status=...}`` counter and the
+   * ``scan_job_duration_seconds`` histogram. The wrapper
+   * re-throws so BullMQ keeps the existing failure handling.
+   */
+  private async runAdminScan(payload: AdminScanJobPayload): Promise<void> {
+    const baseWorker = new AdminScanWorker(
+      this.scanRepo,
+      this.scanBus,
+      async (path) => this.scanProcessor.handle({ path }),
+      async (jobId) => this.discoverScanFiles(jobId),
+    );
+    const instrumented = instrumentAdminScanWorker(baseWorker, this.metrics);
+    await instrumented.handle(payload);
+  }
+
+  /**
+   * Recursively walk the library's ``root_path`` and return
+   * every file path the worker should process. The walk is
+   * best-effort: a missing directory yields an empty list
+   * (the worker still transitions the job to ``done`` with
+   * ``total_files = 0``).
+   */
+  private async discoverScanFiles(jobId: string): Promise<string[]> {
+    const row = await this.scanRepo.getJob(jobId);
+    if (!row || row.libraryId === null) {
+      return [];
+    }
+    const library = await this.libraries.findById(row.libraryId);
+    if (!library) return [];
+    return walkLibrary(library.rootPath);
   }
 
   async onApplicationShutdown(): Promise<void> {
@@ -266,7 +385,12 @@ export class WorkersBootstrap implements OnModuleInit, OnApplicationShutdown {
  * serving traffic even when the broker is down.
  */
 @Module({
-  imports: [DownloadsModule],
+  imports: [
+    DownloadsModule,
+    LibrariesModule,
+    forwardRef(() => ScanModule),
+    ObservabilityModule,
+  ],
   providers: [
     ScanProcessor,
     DownloadsProcessor,
@@ -279,3 +403,8 @@ export class WorkersBootstrap implements OnModuleInit, OnApplicationShutdown {
   exports: [ScanProcessor, DownloadsProcessor, BULLMQ_CONNECTION],
 })
 export class WorkersModule {}
+
+// NOTE: BULLMQ_CONNECTION is registered above (not in a dedicated
+// BullMqModule) for historical reasons. A future refactor could
+// split it out so neither ScanModule nor WorkersModule have to
+// import each other for the connection token.

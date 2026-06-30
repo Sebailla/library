@@ -39,6 +39,24 @@ export interface DownloadStats {
   top_devices: Array<{ device_id: string; count: number }>;
 }
 
+/**
+ * PR-N3 — single row in the response to
+ * ``GET /api/downloads/by-book/:book_id``.
+ *
+ * One row per device that has downloaded the book. ``count`` is
+ * the number of download rows (including in-progress) attributed
+ * to ``(device_id, book_id)``. ``lastDownloadedAt`` is the most
+ * recent ``downloaded_at`` for that pair — useful for the admin
+ * dashboard to surface "active readers" vs "downloaded-once-
+ * then-stale" devices.
+ */
+export interface TopDeviceForBook {
+  deviceId: string;
+  deviceName: string | null;
+  count: number;
+  lastDownloadedAt: Date;
+}
+
 interface DownloadRow {
   id: string | number;
   book_id: string | number;
@@ -109,12 +127,38 @@ export interface DownloadsRepository {
    */
   updateProgress(id: number, bytesTransferred: number): Promise<void>;
   listByDevice(deviceId: string, opts?: { limit?: number }): Promise<Download[]>;
+  /**
+   * PR-N3 — caller-scoped list for ``GET /api/me/downloads``.
+   * Same shape as ``listByDevice``; the service keeps them as
+   * distinct methods so future divergences (e.g. an additional
+   * ``completed`` filter on the self-history endpoint) do not
+   * silently affect the path-param-driven route.
+   */
+  listForDevice(
+    deviceId: string,
+    opts?: { limit?: number },
+  ): Promise<Download[]>;
+  /**
+   * PR-N3 — every download for a given book, newest first. Backs
+   * the per-book activity log on the admin surface and the
+   * in-memory mirror used by the e2e tests.
+   */
+  findByBookId(bookId: number, opts?: { limit?: number }): Promise<Download[]>;
   findById(id: number): Promise<Download | null>;
   findCompletedForDeviceAndBook(
     deviceId: string,
     bookId: number,
   ): Promise<Download | null>;
   stats(): Promise<DownloadStats>;
+  /**
+   * PR-N3 — top devices for a given book. Powers
+   * ``GET /api/downloads/by-book/:book_id`` (admin-only). Returns
+   * at most ``limit`` rows, ordered by ``count`` DESC then
+   * ``device_id`` ASC for ties. Rows with ``device_id IS NULL``
+   * (legacy / unattributable) are excluded so the response is
+   * always a clean per-device ranking.
+   */
+  topDevicesForBook(bookId: number, limit: number): Promise<TopDeviceForBook[]>;
   close(): Promise<void>;
 }
 
@@ -176,6 +220,43 @@ export class PgDownloadsRepository implements DownloadsRepository {
        ORDER BY downloaded_at DESC, id DESC
        LIMIT $2`,
       [deviceId, limit],
+    );
+    return res.rows.map(rowToDownload);
+  }
+
+  /**
+   * PR-N3 — caller-scoped list for ``GET /api/me/downloads``.
+   * Semantically identical to ``listByDevice`` today (filter by
+   * ``device_id``, order by ``downloaded_at DESC``); kept as a
+   * separate method so future divergence on the self-history
+   * endpoint cannot silently affect the path-param-driven one.
+   */
+  async listForDevice(
+    deviceId: string,
+    opts: { limit?: number } = {},
+  ): Promise<Download[]> {
+    return this.listByDevice(deviceId, opts);
+  }
+
+  /**
+   * PR-N3 — every download for a given book, newest first. Powers
+   * the per-book activity log on the admin surface (a future
+   * chained PR may expose ``GET /api/downloads/by-book/:book_id/all``
+   * — for PR-N3 the contract is locked here so the admin tooling
+   * can call it directly).
+   */
+  async findByBookId(
+    bookId: number,
+    opts: { limit?: number } = {},
+  ): Promise<Download[]> {
+    const limit = opts.limit ?? 100;
+    const res = await this.pool.query<DownloadRow>(
+      `SELECT ${COLUMNS}
+       FROM downloads
+       WHERE book_id = $1
+       ORDER BY downloaded_at DESC, id DESC
+       LIMIT $2`,
+      [bookId, limit],
     );
     return res.rows.map(rowToDownload);
   }
@@ -242,6 +323,42 @@ export class PgDownloadsRepository implements DownloadsRepository {
         count: Number(r.count),
       })),
     };
+  }
+
+  async topDevicesForBook(
+    bookId: number,
+    limit: number,
+  ): Promise<TopDeviceForBook[]> {
+    // Two aggregates against the same index (idx_downloads_book):
+    //   COUNT(*) per (device_id, book_id) — for ``count``.
+    //   MAX(downloaded_at) per (device_id, book_id) — for ``last_downloaded_at``.
+    // ``device_id IS NOT NULL`` excludes legacy / unattributable
+    // rows from the ranking. The tie-break on ``device_id`` ASC
+    // matches the per-book stats endpoint so the two surfaces
+    // behave consistently for the same book.
+    const res = await this.pool.query<{
+      device_id: string;
+      device_name: string | null;
+      count: string;
+      last_downloaded_at: Date;
+    }>(
+      `SELECT device_id,
+              MAX(device_name) AS device_name,
+              COUNT(*)::text AS count,
+              MAX(downloaded_at) AS last_downloaded_at
+       FROM downloads
+       WHERE book_id = $1 AND device_id IS NOT NULL
+       GROUP BY device_id
+       ORDER BY COUNT(*) DESC, device_id ASC
+       LIMIT $2`,
+      [bookId, limit],
+    );
+    return res.rows.map((row) => ({
+      deviceId: row.device_id,
+      deviceName: row.device_name,
+      count: Number(row.count),
+      lastDownloadedAt: row.last_downloaded_at,
+    }));
   }
 
   async close(): Promise<void> {

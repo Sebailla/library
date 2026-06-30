@@ -11,6 +11,11 @@ import { SearchModule } from './search/search.module';
 import { DownloadsModule } from './downloads/downloads.module';
 import { WorkersModule } from './workers/workers.module';
 import { DiscoveryModule } from './discovery/discovery.module';
+import { FilesModule } from './files/files.module';
+import { LibrariesModule } from './libraries/libraries.module';
+import { ScanModule } from './admin/scan/scan.module';
+import { ObservabilityModule } from './observability/observability.module';
+import { OrganizeModule } from './admin/organize/organize.module';
 
 /**
  * Reshape {@link ThrottlerException} into the project's standard
@@ -59,6 +64,42 @@ class ThrottlerExceptionFilter implements ExceptionFilter {
  * bearer token; it returns the mDNS service name, HTTP port,
  * Tailscale IPv4 (or ``null``), and the host's LAN IPv4 list.
  *
+ * PR-N1 adds the ``FilesModule`` which exposes the
+ * ``GET /api/files/:book_id`` and ``HEAD /api/files/:book_id``
+ * endpoints used to stream book files with HTTP Range support.
+ * The module is read-only against the books table and reuses
+ * ``BOOKS_REPOSITORY`` so the path validation can look up
+ * ``books.file_path`` without a second DB connection.
+ *
+ * PR-N2 adds the ``LibrariesModule`` which exposes the
+ * ``/api/libraries`` HTTP surface — CRUD over the
+ * ``libraries`` table, per-device active library activation,
+ * and creator-only authorisation for PATCH / DELETE. The
+ * module imports ``BooksModule`` so the
+ * ``LIBRARY_BOOK_COUNT`` adapter can call
+ * ``BOOKS_REPOSITORY.countByLibrary`` to enforce the
+ * "refuse DELETE when books are indexed" rule.
+ *
+ * PR-N4 adds the ``ScanModule`` which exposes the
+ * ``/api/admin/scan/*`` HTTP surface — admin-only full /
+ * incremental scan enqueue, status listing, cooperative
+ * cancellation, and SSE progress streaming. The module is gated
+ * by ``JwtAuthGuard`` + ``ScanAdminGuard`` so only paired devices
+ * with ``is_admin = true`` (migration 015) can trigger a scan.
+ *
+ * PR-N7 adds the ``ObservabilityModule`` which exposes
+ * ``GET /metrics`` (Prometheus exposition format with HTTP,
+ * scan, and download counters + histograms) and registers the
+ * ``MetricsService`` singleton used by the request middleware
+ * mounted in ``main.ts`` and by the scan / downloads business
+ * code paths.
+ *
+ * PR-N5 adds the ``OrganizeModule`` which exposes the
+ * ``/api/admin/organize/*`` HTTP surface — admin-only analyze
+ * (proposed paths for a folder) and execute (idempotent
+ * fs.rename with skip-on-target-exists semantics). Reuses the
+ * same ``ScanAdminGuard`` so the same role escalation applies.
+ *
  * Rate limiting (#34, 4R review): ``ThrottlerModule`` is
  * registered with three named buckets (see ``throttlers`` array
  * below) and the ``ThrottlerGuard`` is bound as a global APP_GUARD
@@ -92,6 +133,11 @@ class ThrottlerExceptionFilter implements ExceptionFilter {
     DownloadsModule,
     WorkersModule,
     DiscoveryModule,
+    FilesModule,
+    LibrariesModule,
+    ScanModule,
+    ObservabilityModule,
+    OrganizeModule,
   ],
   providers: [
     {

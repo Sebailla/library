@@ -18,6 +18,7 @@ import {
 import { DOWNLOADS_REPOSITORY } from '../../src/downloads/downloads.repository';
 import { BULLMQ_CONNECTION } from '../../src/workers/bullmq.config';
 import IORedis from 'ioredis';
+import { MetricsService } from '../../src/observability/metrics.service';
 
 /**
  * Contract tests for {@link WorkersBootstrap} (PR-2E, work unit 2).
@@ -51,15 +52,55 @@ class StubDownloadsRepository {
   async listByDevice() {
     return [];
   }
+  async listForDevice() {
+    return [];
+  }
+  async findByBookId() {
+    return [];
+  }
   async findCompletedForDeviceAndBook() {
     return null;
   }
   async stats() {
     return { total: 0, completed: 0, top_books: [], top_devices: [] };
   }
+  async topDevicesForBook() {
+    return [];
+  }
   async close() {
     /* no-op */
   }
+}
+
+/**
+ * PR-N4 — stub the new collaborators the bootstrap now
+ * requires for the admin scan wiring. ``scanRepo`` /
+ * ``scanBus`` are never exercised in the "skip when Redis is
+ * down" path; the stubs satisfy the type-checker and let the
+ * no-op branches run.
+ */
+class StubScanRepository {
+  async getJob() { return null; }
+  async setJobStatus() { return null; }
+  async setJobError() { return null; }
+  async updateProgress() { return null; }
+  async isCancelled() { return false; }
+  async requestCancellation() { /* no-op */ }
+  async insertJob() { return {} as never; }
+  async listJobs() { return []; }
+  async close() { /* no-op */ }
+}
+
+class StubLibrariesRepository {
+  async findById() { return null; }
+  async list() { return []; }
+  async insert() { return {} as never; }
+  async update() { return null; }
+  async delete() { return true; }
+  async setActiveForDevice() { /* no-op */ }
+  async getActiveForDevice() { return null; }
+  async listForDevice() { return []; }
+  async close() { /* no-op */ }
 }
 
 describe('WorkersBootstrap', () => {
@@ -78,6 +119,16 @@ describe('WorkersBootstrap', () => {
       null,
       new ScanProcessor(),
       new DownloadsProcessor(new StubDownloadsRepository()),
+      new StubScanRepository() as never,
+      // ``ScanEventBus`` constructor takes no args.
+      new (require('../../src/admin/scan/scan-event-bus').ScanEventBus)(),
+      new StubLibrariesRepository() as never,
+      // PR-N7 — MetricsService for instrumentation. The bootstrap
+      // is responsible for firing scan_jobs_total via the
+      // instrumented worker; pass a real instance with the
+      // registry created by onApplicationBootstrap() so the test
+      // exercises the same code path as production.
+      new MetricsService(),
     );
     await bootstrap.onModuleInit();
     // No exceptions, no workers started. Closing the bootstrap
@@ -101,6 +152,10 @@ describe('WorkersBootstrap', () => {
       client,
       new ScanProcessor(),
       new DownloadsProcessor(new StubDownloadsRepository()),
+      new StubScanRepository() as never,
+      new (require('../../src/admin/scan/scan-event-bus').ScanEventBus)(),
+      new StubLibrariesRepository() as never,
+      new MetricsService(),
     );
     // The probe caps the wait at 750ms; we extend the Jest
     // timeout slightly to absorb DNS / handshake overhead.

@@ -10,6 +10,7 @@ import {
   DownloadStats,
   DownloadsRepository,
   NewDownload,
+  TopDeviceForBook,
 } from './downloads.repository';
 
 /** Result returned by ``POST /api/downloads``. */
@@ -40,6 +41,24 @@ export interface ListByDeviceResponse {
     file_size_bytes: number | null;
     bytes_transferred: number | null;
     completed: boolean;
+  }>;
+}
+
+/**
+ * PR-N3 — Result returned by ``GET /api/downloads/by-book/:book_id``.
+ *
+ * Top-N devices that have downloaded the given book, ordered by
+ * download count DESC and ``device_id`` ASC for ties. ``last_downloaded_at``
+ * is the most recent ``downloaded_at`` for the (device, book) pair
+ * — useful for the admin dashboard to spot stale vs active readers.
+ */
+export interface TopDevicesForBookResponse {
+  book_id: number;
+  top_devices: Array<{
+    device_id: string;
+    device_name: string | null;
+    count: number;
+    last_downloaded_at: string;
   }>;
 }
 
@@ -163,6 +182,33 @@ export class DownloadsService {
   /** Aggregated download statistics powering ``GET /api/downloads/stats``. */
   async getStats(): Promise<DownloadStats> {
     return this.downloads.stats();
+  }
+
+  /**
+   * PR-N3 — top devices that downloaded a given book.
+   *
+   * Default limit is ``10`` so the admin endpoint stays cheap
+   * even on a heavily-shared book. The repository aggregates
+   * count + last_downloaded_at per ``(book_id, device_id)`` in
+   * one round-trip; the service just maps to the wire shape.
+   */
+  async topDevicesForBook(
+    bookId: number,
+    limit: number = 10,
+  ): Promise<TopDevicesForBookResponse> {
+    const rows: TopDeviceForBook[] = await this.downloads.topDevicesForBook(
+      bookId,
+      limit,
+    );
+    return {
+      book_id: bookId,
+      top_devices: rows.map((row) => ({
+        device_id: row.deviceId,
+        device_name: row.deviceName,
+        count: row.count,
+        last_downloaded_at: row.lastDownloadedAt.toISOString(),
+      })),
+    };
   }
 
   /** Newest-first history of every download for a given device. */

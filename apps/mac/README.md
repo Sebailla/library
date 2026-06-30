@@ -136,7 +136,7 @@ The next launch will pick up new pairing credentials again.
 
 | Command            | What it does                                                |
 |--------------------|-------------------------------------------------------------|
-| `npm test`         | Run the vitest unit suite (40 tests across 7 files).        |
+| `npm test`         | Run the vitest unit + integration suite (64 tests across 12 files). |
 | `npm run typecheck`| `tsc --noEmit` against the full tsconfig.                   |
 | `npm run build`    | Compile `src/*.ts` into `dist/*.js` (electron-forge input). |
 | `npm run dev`      | Boot Electron in dev mode (loads `http://localhost:3001`).  |
@@ -144,6 +144,8 @@ The next launch will pick up new pairing credentials again.
 | `npm run package`  | `electron-forge package` — produce an unsigned mac build.   |
 | `npm run make`     | `electron-forge make` — produce a DMG + ZIP artefact.       |
 | `npm run dist`     | `electron-builder --mac` — produce a codesigned, notarised DMG (see `BUILD.md`). |
+| `npm run dist:mac:sign`  | `apps/mac/scripts/sign-and-notarize.sh` — production codesign + `notarytool submit --wait`. |
+| `npm run dist:mac:unsigned` | `electron-builder --mac … --publish never` — codesign + DMG without hitting GitHub Releases. |
 
 For `npm run dev` / `npm run start` to be useful, start the
 Next.js dev server in another terminal first:
@@ -219,9 +221,11 @@ sidecar's own error code.
 
 ## Test plan
 
-- `npm test` — 40 unit tests across `preload`, `sidecar-manager`,
-  `ipc-handlers`, `sidecar-client`, `electron-builder`,
-  `npmrc`, and `verify-dist`.
+- `npm test` — vitest unit + integration suite (64 tests across
+  `preload`, `sidecar-manager`, `ipc-handlers`, `sidecar-client`,
+  `electron-builder`, `npmrc`, `verify-dist`, `downloader`,
+  `syncer`, `sidecar.end-to-end`, `updater`, and
+  `sign-and-notarize`).
 - `npm run build` — `tsc -p tsconfig.build.json` compiles
   `src/*.ts` → `dist/*.js` with no errors.
 - `npm run start` — boots Electron in dev mode and loads
@@ -234,7 +238,15 @@ See `BUILD.md` at the repository root for the full release flow
 
 ## Status
 
-PR-4D scaffold. The downloader and syncer are stubs that return
-`{ ok: true, transport: 'stub' }`; a future PR will wire them to
-the real implementations. The codesign + notarise pipeline is
-documented but not yet run end-to-end on a runner.
+PR-N8 — real IPC integrations. The downloader (`src/downloader.ts`)
+hits the NAS over native `fetch` against the four endpoints used by
+`apps/web` (`listBooks`, `startDownload`, `downloadFile`,
+`completeDownload`). The syncer (`src/syncer.ts`) watches the
+bundled `iCloud~com~alejandria~app/` directory via chokidar, with
+`pull()` reading the directory at startup and `change` events
+fired on every write. The auto-updater (`src/updater.ts`) reads
+`process.env.GH_TOKEN` at call time so CI can rotate the secret
+between invocations, and falls back to a no-op when
+`app.isPackaged === false`. The codesign + notarize shell script
+(`scripts/sign-and-notarize.sh`) uses `xcrun notarytool submit --wait`
+so the script only returns 0 after Apple has stamped the binary.

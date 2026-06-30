@@ -220,3 +220,61 @@ Fourth release of the `alejandria-v2` refactor. Closes PR4 (Electron + iCloud + 
 - PR #78: feat(mac): production build config + codesign docs
 
 See [CHANGELOG.md](https://github.com/Sebailla/library/blob/v0.4.0/CHANGELOG.md) for full details.
+
+---
+
+## [0.5.0] — 2026-06-30 — NAS backend closure (PR-N1..N8)
+
+Fifth release of `alejandria-v2`. Closes the NAS backend story (PR2 + N1..N8). The NAS now exposes the full surface required by the v0.4 web app and the v0.4 Mac shell: range-resumable downloads, multi-library registry, download tracking with admin gate, admin scan with SSE + cooperative cancel, admin organize with idempotent moves, OpenAPI spec + Swagger UI + generated TS SDK client, Prometheus metrics + structured Pino logger, and real Mac IPC integrations with codesign + notarize.
+
+### Added
+
+- `GET /api/files/:book_id` with HTTP `Range` support (PR-N1)
+- `HEAD /api/files/:book_id` returning `Content-Length` + `Accept-Ranges: bytes` (PR-N1)
+- `GET /api/libraries` + `POST /api/libraries` + `GET /api/libraries/:id` + `PATCH /api/libraries/:id` + `DELETE /api/libraries/:id` + `PUT /api/libraries/:id/active` (PR-N2)
+- `library_id` scoping on `books` (PR-N2)
+- `devices.is_admin` column + `isAdmin()` repository method (PR-N3)
+- `GET /api/downloads/by-book/:book_id` (admin-only) (PR-N3)
+- `GET /api/me/downloads` (caller-scoped) (PR-N3)
+- Admin gate on `/api/downloads/stats` returning 403 ADMIN_REQUIRED (PR-N3)
+- Privacy check on `/api/downloads/by-device/:device_id` (PR-N3)
+- `POST /api/admin/scan/full` + `POST /api/admin/scan/incremental` (PR-N4)
+- `GET /api/admin/scan/status` + `GET /api/admin/scan/status/:job_id` (PR-N4)
+- `POST /api/admin/scan/cancel/:job_id` (cooperative cancel) (PR-N4)
+- `GET /api/admin/scan/events/:job_id` (SSE stream) (PR-N4)
+- `POST /api/admin/organize/analyze` + `POST /api/admin/organize/execute` (idempotent) (PR-N5)
+- `GET /api/admin/organize/plans/:plan_id` (PR-N5)
+- `/api/docs` (Swagger UI) + `/api/docs-json` (raw spec) (PR-N6)
+- Generated TS SDK client at `services/nas-backend/clients/ts/api.d.ts` (PR-N6)
+- `GET /metrics` Prometheus exposition (PR-N7)
+- Pino structured logger with `X-Request-Id` propagation via AsyncLocalStorage (PR-N7)
+- Counters + histograms for HTTP requests, scan jobs, downloads (PR-N7)
+- Real Mac downloader (native fetch) + real iCloud syncer (chokidar) (PR-N8)
+- `scripts/sign-and-notarize.sh` codesign + `xcrun notarytool submit --wait` flow (PR-N8)
+- `electron-updater` wired to read `GH_TOKEN` from env (PR-N8)
+
+### Stats
+
+- 84 commits since v0.4.0
+- 117 files changed
+- +18,356 / -105 LOC
+- 273+ tests passing (out of 337 — 1 pre-existing failure unrelated to this block)
+
+### 4R Review Outcome
+
+The block was reviewed via 4R fan-out (R1 Risk + R2 Readability + R3 Reliability + R4 Resilience) and adjudicated via judgment-day (dual blind judges). Verdict: **APPROVED**. Three follow-up issues opened for non-blocking improvements:
+
+- #98: collapse scan.module.ts producer literal into buildQueueOptions()
+- #99: emit downloads_total{state="failed"} on exception path
+- #100: add SSE heartbeat + e2e test for /api/admin/scan/events
+
+### Pull requests
+
+- PR #81: feat(nas-backend): GET /api/files/:id with HTTP Range support (N1)
+- PR #83: feat(nas-backend): multi-library registry (N2)
+- PR #85: feat(nas-backend): download tracking enhancements + admin gate (N3)
+- PR #87: feat(nas-backend): admin scan endpoints (N4)
+- PR #89: feat(nas-backend): admin organize endpoints (N5)
+- PR #91: feat(nas-backend): OpenAPI spec + Swagger UI + TS SDK client (N6)
+- PR #93: feat(nas-backend): observability — Prometheus metrics + structured logger (N7)
+- PR #95: feat(mac): real IPC integrations + codesign + electron-updater wire (N8)

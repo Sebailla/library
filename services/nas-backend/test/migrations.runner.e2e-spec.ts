@@ -60,6 +60,16 @@ skipIfNoDb('migration runner', () => {
         '009_seed_categories.sql',
         '010_devices.sql',
         '011_pgroonga_defrag.sql',
+        // PR-N2 — multi-library registry. The libraries table must
+        // exist before device_libraries (which references its id)
+        // and before books.library_id (also references it).
+        '012_libraries.sql',
+        '013_device_libraries.sql',
+        '014_books_library_id.sql',
+        // PR-N3 — admin flag on paired devices. The downloads admin
+        // endpoints (stats, by-book) gate on ``devices.is_admin``;
+        // see migration 015.
+        '015_devices_is_admin.sql',
       ]),
     );
     // Order must be lexicographic (which equals numeric for fixed-
@@ -86,6 +96,10 @@ skipIfNoDb('migration runner', () => {
         '009_seed_categories.sql',
         '010_devices.sql',
         '011_pgroonga_defrag.sql',
+        '012_libraries.sql',
+        '013_device_libraries.sql',
+        '014_books_library_id.sql',
+        '015_devices_is_admin.sql',
       ]),
     );
 
@@ -199,6 +213,65 @@ skipIfNoDb('migration runner', () => {
         'ip_address',
       ]);
 
+      // PR-N2 — multi-library registry. Migration 012 introduces
+      // the ``libraries`` table; every column MUST appear in the
+      // documented order so the repository can rely on positional
+      // reads via ``pg``.
+      const libraryCols = await pool.query<{ column_name: string }>(
+        "SELECT column_name FROM information_schema.columns WHERE table_name = 'libraries' ORDER BY ordinal_position",
+      );
+      expect(libraryCols.rows.map((r) => r.column_name)).toEqual([
+        'id',
+        'name',
+        'root_path',
+        'created_by_device_id',
+        'created_at',
+      ]);
+
+      // PR-N2 — migration 013 introduces ``device_libraries`` so
+      // each paired device can mark one of the available libraries
+      // as its active browsing target.
+      const deviceLibrariesCols = await pool.query<{ column_name: string }>(
+        "SELECT column_name FROM information_schema.columns WHERE table_name = 'device_libraries' ORDER BY ordinal_position",
+      );
+      expect(deviceLibrariesCols.rows.map((r) => r.column_name)).toEqual([
+        'device_id',
+        'library_id',
+        'active',
+      ]);
+
+      // PR-N2 — migration 014 adds ``library_id`` to ``books`` so
+      // every book row is scoped to exactly one library.
+      const bookLibraryCol = await pool.query<{ column_name: string }>(
+        "SELECT column_name FROM information_schema.columns WHERE table_name = 'books' AND column_name = 'library_id'",
+      );
+      expect(bookLibraryCol.rows.map((r) => r.column_name)).toEqual([
+        'library_id',
+      ]);
+
+      // PR-N3 — migration 015 adds ``is_admin`` to ``devices`` so
+      // the admin gate on the downloads endpoints has a stable
+      // signal. The column MUST be ``BOOLEAN`` (not nullable) so
+      // every code path branches on a single concrete value.
+      const deviceAdminCol = await pool.query<{
+        column_name: string;
+        data_type: string;
+        is_nullable: string;
+        column_default: string | null;
+      }>(
+        `SELECT column_name, data_type, is_nullable, column_default
+         FROM information_schema.columns
+         WHERE table_name = 'devices' AND column_name = 'is_admin'`,
+      );
+      expect(deviceAdminCol.rows).toEqual([
+        {
+          column_name: 'is_admin',
+          data_type: 'boolean',
+          is_nullable: 'NO',
+          column_default: 'false',
+        },
+      ]);
+
       // Migration 009 seeds a small bilingual taxonomy. The
       // categories table must contain at least the top-level nodes
       // with their ``name_es`` / ``name_en`` pairs.
@@ -298,6 +371,10 @@ skipIfNoDb('migration runner schema_migrations table (#37)', () => {
           '009_seed_categories.sql',
           '010_devices.sql',
           '011_pgroonga_defrag.sql',
+          '012_libraries.sql',
+          '013_device_libraries.sql',
+          '014_books_library_id.sql',
+          '015_devices_is_admin.sql',
         ]),
       );
       // Every applied_at must be a parseable ISO timestamp.

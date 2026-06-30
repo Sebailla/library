@@ -49,6 +49,10 @@ export interface ListFilters {
   authorId?: number;
   format?: string;
   language?: string;
+  // PR-N2 — optional per-library filter. When ``undefined`` the
+  // repository does not add a ``WHERE`` clause for the column;
+  // the controller can keep the catalog-wide default view.
+  libraryId?: number;
 }
 
 /** Repository contract for the ``books`` table. */
@@ -59,6 +63,7 @@ export interface BooksRepository {
   list(opts?: PaginationOpts & ListFilters): Promise<Book[]>;
   count(filters?: ListFilters): Promise<number>;
   search(query: string, opts?: PaginationOpts): Promise<Book[]>;
+  countByLibrary(libraryId: number): Promise<number>;
   close(): Promise<void>;
 }
 
@@ -160,7 +165,7 @@ export class PgBooksRepository implements BooksRepository {
   }
 
   async list(opts: PaginationOpts & ListFilters = {}): Promise<Book[]> {
-    const { authorId, format, language, ...pagination } = opts;
+    const { authorId, format, language, libraryId, ...pagination } = opts;
     const where: string[] = [];
     const params: unknown[] = [];
     if (authorId !== undefined) {
@@ -174,6 +179,10 @@ export class PgBooksRepository implements BooksRepository {
     if (language !== undefined) {
       params.push(language);
       where.push(`language = $${params.length}`);
+    }
+    if (libraryId !== undefined) {
+      params.push(libraryId);
+      where.push(`library_id = $${params.length}`);
     }
     const whereClause = where.length ? `WHERE ${where.join(' AND ')}` : '';
     return this.runList(
@@ -198,6 +207,10 @@ export class PgBooksRepository implements BooksRepository {
       params.push(filters.language);
       where.push(`language = $${params.length}`);
     }
+    if (filters.libraryId !== undefined) {
+      params.push(filters.libraryId);
+      where.push(`library_id = $${params.length}`);
+    }
     const whereClause = where.length ? `WHERE ${where.join(' AND ')}` : '';
     const res = await this.pool.query<{ count: string }>(
       `SELECT COUNT(*)::int AS count FROM books ${whereClause}`,
@@ -220,6 +233,19 @@ export class PgBooksRepository implements BooksRepository {
       [query],
       opts,
     );
+  }
+
+  /**
+   * Count the books currently indexed for the given library.
+   * The libraries service uses this to refuse DELETE with 409
+   * LIBRARY_NOT_EMPTY when the count is non-zero.
+   */
+  async countByLibrary(libraryId: number): Promise<number> {
+    const res = await this.pool.query<{ count: string }>(
+      'SELECT COUNT(*)::int AS count FROM books WHERE library_id = $1',
+      [libraryId],
+    );
+    return Number(res.rows[0].count);
   }
 
   async close(): Promise<void> {

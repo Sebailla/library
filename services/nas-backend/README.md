@@ -26,6 +26,21 @@ NestJS application that backs the **alejandria-v2** NAS catalog.
 > - **PR-2D** — `BooksModule`, `SearchModule`
 > - **PR-2E** — `DownloadsModule`, `WorkersModule` (BullMQ)
 > - **PR-2F** — `DiscoveryModule` (mDNS + Tailscale)
+> - **PR-N1** — `FilesModule` (`GET /api/files/:id` with HTTP Range,
+>   `HEAD /api/files/:id` for resumable downloads)
+> - **PR-N2** — `LibrariesModule` (`/api/libraries/*` CRUD + per-device
+>   active library, `books.library_id` scoping on the catalog queries)
+> - **PR-N3** — Download tracking enhancements: `devices.is_admin`
+>   (migration 015) + admin gate on `/api/downloads/stats` and
+>   `/api/downloads/by-book/:book_id` (403 `ADMIN_REQUIRED`), plus
+>   `GET /api/me/downloads` (caller-scoped) and the privacy check
+>   on `/api/downloads/by-device/:device_id` (path-vs-bearer match).
+> - **PR-N4** — `ScanModule` (`/api/admin/scan/*` admin-only full /
+>   incremental scan enqueue + status list + cooperative cancel +
+>   SSE progress streaming). `scan_jobs` table (migration 016) is
+>   the durable record; a BullMQ worker (`admin-scan` queue) walks
+>   `library.root_path` cooperatively, observing the `cancelled`
+>   flag between files.
 
 ## Stack
 
@@ -44,9 +59,9 @@ NestJS application that backs the **alejandria-v2** NAS catalog.
 services/nas-backend/
 ├── src/
 │   ├── main.ts                # NestJS bootstrap
-│   ├── app.module.ts          # root module (Database + Health + Auth + Me)
+│   ├── app.module.ts          # root module (Database + Health + Auth + Me + Books + Files + Libraries + ...)
 │   ├── database/              # PR-2B — Postgres pool + DatabaseModule
-│   ├── repositories/          # PR-2B — books, categories, sagas, downloads
+│   ├── repositories/          # PR-2B + PR-N2 — books, categories, sagas, downloads
 │   ├── auth/                  # PR-2C — AuthModule, JWT, devices repo
 │   │   ├── auth.module.ts
 │   │   ├── auth.controller.ts # POST /api/auth/pair, POST /api/auth/refresh
@@ -54,9 +69,31 @@ services/nas-backend/
 │   │   ├── jwt.strategy.ts    # passport-jwt strategy
 │   │   ├── jwt-auth.guard.ts  # Bearer-token guard
 │   │   └── devices.repository.ts
-│   ├── me/                    # PR-2C — sample protected route
+│   ├── me/                    # PR-2C + PR-N3 — caller-scoped routes
 │   │   ├── me.module.ts
-│   │   └── me.controller.ts   # GET /api/me
+│   │   └── me.controller.ts   # GET /api/me, GET /api/me/downloads (PR-N3)
+│   ├── files/                 # PR-N1 — Range-aware file streaming
+│   │   ├── files.module.ts    # wires FilesService + LIBRARY_ROOT token
+│   │   ├── files.controller.ts # GET/HEAD /api/files/:book_id
+│   │   ├── files.service.ts   # parseRangeHeader, resolveBookFilePath,
+│   │   │                       # streamFile
+│   │   └── files.types.ts     # RangeSpec, RangeParseError, FORMAT_TO_MIME
+│   ├── libraries/             # PR-N2 — multi-library registry
+│   │   ├── libraries.module.ts   # wires controller + service + repository
+│   │   ├── libraries.controller.ts # GET/POST /api/libraries, GET/PATCH/DELETE /:id, PUT /:id/active
+│   │   ├── libraries.service.ts   # creator-only authz + LIBRARY_NOT_EMPTY
+│   │   ├── libraries.repository.ts # PgLibrariesRepository + LIBRARIES_REPOSITORY token
+│   │   ├── libraries.adapters.ts # PgLibraryBookCountAdapter, PgDeviceLookupAdapter
+│   │   └── libraries.types.ts  # Library, NewLibrary, LibraryPatch, DeviceLibrary
+│   ├── admin/                   # PR-N4 — admin-only HTTP surfaces
+│   │   └── scan/                #   PR-N4 admin scan (enqueue, status, cancel, SSE)
+│   │       ├── scan.module.ts       # wires controller + service + repository + event bus + BullMQ producer
+│   │       ├── scan.controller.ts   # POST/GET /api/admin/scan/* + SSE
+│   │       ├── scan.service.ts      # enqueue + cancel orchestration
+│   │       ├── scan.repository.ts   # PgScanRepository + SCAN_REPOSITORY token
+│   │       ├── scan-admin.guard.ts  # JwtAuthGuard + DEVICES_REPOSITORY.is_admin check
+│   │       ├── scan-event-bus.ts    # per-jobId EventEmitter wrapper for SSE fan-out
+│   │       └── scan.types.ts        # ScanJob, ScanJobKind, ScanJobStatus, ScanProgressEvent, NewScanJob
 │   └── health/
 │       ├── health.controller.ts
 │       ├── health.module.ts
@@ -69,6 +106,7 @@ services/nas-backend/
 │   ├── health.e2e-spec.ts     # supertest contract tests
 │   ├── auth.e2e-spec.ts       # PR-2C — pair + refresh contract
 │   ├── me.e2e-spec.ts         # PR-2C — protected route contract
+│   ├── files.e2e-spec.ts      # PR-N1 — GET/HEAD /api/files Range contract
 │   ├── migrations.runner.e2e-spec.ts   # runner + idempotency
 │   └── repositories/          # per-repository e2e contract tests
 ├── Dockerfile                 # multi-stage build
@@ -171,6 +209,9 @@ Coverage:
 | Bilingual category seed (migration 009) | `/ciencia`, `/arte`, `/literatura` present with `parent_id` wired |
 | `BooksRepository` insert + findById | round-trip |
 | `BooksRepository` listByAuthor + pagination + search | returns only matching rows |
+| `BooksRepository` list / count with `libraryId` filter | narrows to a single library |
+| `LibrariesRepository` insert / findById / list / update / delete | round-trip every CRUD method |
+| `LibrariesRepository` setActiveForDevice + getActiveForDevice | at most one active library per device |
 | `CategoriesRepository` findSubtree | recursive CTE returns root + every descendant |
 | `SagasRepository` attachBook + listByAuthor | idempotent attach, per-author filter |
 | `DownloadsRepository` insert + markCompleted + listByDevice | ordered by `downloaded_at DESC` |
@@ -197,6 +238,18 @@ Coverage:
 | `GET /api/me` valid Bearer | `200` `{device_id, device_name}` |
 | `GET /api/me` tampered Bearer | `401` `error.code = TOKEN_INVALID` |
 | Migration runner — `010_devices.sql` applied | `devices` table has the documented columns |
+| Migration runner — `012-014` applied | `libraries` + `device_libraries` + `books.library_id` exist with the documented shape |
+| `GET /api/libraries` no Bearer | `401` `error.code = UNAUTHORIZED` |
+| `GET /api/libraries` valid Bearer | `200` `[]` when empty, snake_case DTOs when populated |
+| `POST /api/libraries` valid Bearer | `201` LibraryDto with `created_by_device_id` stamped |
+| `POST /api/libraries` empty `name` | `400` from global ValidationPipe |
+| `GET /api/libraries/:id` missing | `404` `error.code = NOT_FOUND` |
+| `PATCH /api/libraries/:id` not the creator | `403` `error.code = FORBIDDEN` |
+| `PATCH /api/libraries/:id` empty body | `404` `error.code = EMPTY_PATCH` |
+| `DELETE /api/libraries/:id` not the creator | `403` `error.code = FORBIDDEN` |
+| `DELETE /api/libraries/:id` books still indexed | `409` `error.code = LIBRARY_NOT_EMPTY` |
+| `DELETE /api/libraries/:id` empty + creator | `204` and the row vanishes |
+| `PUT /api/libraries/:id/active` missing | `404` `error.code = NOT_FOUND` |
 
 ## Environment variables
 
@@ -225,10 +278,13 @@ openssl rand -base64 16   # → NAS_PAIR_PIN  (>= 8 chars)
 
 ## What's NOT here yet
 
-PR-2D + PR-2E + PR-2F ship the catalog HTTP slice, the downloads
-tracking endpoints, the BullMQ workers that consume the Python
-sidecar, and the mDNS + Tailscale discovery module. See
-`openspec/changes/alejandria-v2/tasks.md` Phase 2 for the full list.
+PR-2D + PR-2E + PR-2F + PR-N1 + PR-N2 ship the catalog HTTP
+slice, the downloads tracking endpoints, the BullMQ workers
+that consume the Python sidecar, the mDNS + Tailscale
+discovery module, the Range-aware files streaming endpoint,
+and the multi-library registry. See
+`openspec/changes/alejandria-v2/tasks.md` Phase 2 for the full
+list.
 
 ## Downloads + Workers (PR-2E)
 
@@ -240,15 +296,27 @@ HTTP layer and the Python sidecar.
 ```
 POST   /api/downloads                { book_id, device_id?, device_name?, user_id?, file_size_bytes? }
                                     → 201 { download_id, resume_supported }
+                                    (admin: not required)
 
 PATCH  /api/downloads/:id            { completed?, bytes_transferred }
                                     → 200 { id, completed, bytes_transferred, book_id, device_id, downloaded_at }
+                                    (admin: not required)
 
 GET    /api/downloads/stats
                                     → 200 { total, completed, top_books: [...], top_devices: [...] }
+                                    (admin: REQUIRED)
+
+GET    /api/downloads/by-book/:book_id
+                                    → 200 { book_id, top_devices: [{device_id, device_name, count, last_downloaded_at}] }
+                                    (admin: REQUIRED)
 
 GET    /api/downloads/by-device/:device_id
                                     → 200 { data: Download[] }
+                                    (admin: not required; privacy check — path param MUST match bearer)
+
+GET    /api/me/downloads            (PR-N3)
+                                    → 200 { data: Download[] }
+                                    (admin: not required; caller-scoped via JWT)
 ```
 
 `POST /api/downloads` is **idempotent**: if a `(book_id, device_id)`
@@ -261,6 +329,41 @@ counts do not get clobbered by a reconnect).
 All four endpoints sit behind `JwtAuthGuard`. The repository token
 (`DOWNLOADS_REPOSITORY`) is exposed as a string so e2e tests stub
 it with an in-memory implementation.
+
+#### Admin gate (PR-N3)
+
+`GET /api/downloads/stats` and `GET /api/downloads/by-book/:book_id`
+require `device.is_admin = true` (migration 015). A non-admin
+bearer gets:
+
+```json
+403 { "error": { "code": "ADMIN_REQUIRED", "message": "admin role required" } }
+```
+
+The check fires on identity resolution: every request reads
+`req.device.deviceId` from the `JwtAuthGuard`, looks up the row in
+`DevicesRepository.isAdmin`, and refuses with the same envelope on
+mismatch. The other endpoints (POST, PATCH, `/by-device/:id`,
+`/me/downloads`) are open to every paired device; the privacy
+check on `/by-device/:id` is the bearer-vs-path-param comparison
+4R #42 introduced, and `/me/downloads` resolves `device_id`
+server-side exclusively.
+
+#### Privacy boundary (PR-N3)
+
+`GET /api/downloads/by-device/:device_id` enforces that the path
+param equals the bearer's `deviceId` — otherwise:
+
+```json
+403 { "error": { "code": "FORBIDDEN", "message": "Bearer device does not match path param" } }
+```
+
+`GET /api/me/downloads` is the caller-scoped alternative: there
+is no client-controlled identifier on the wire, so a paired but
+unprivileged device cannot ask for another device's history by
+passing a different `device_id`. The repository method
+`listForDevice` is the privacy boundary; the controller does not
+trust any user input beyond the JWT-derived identity.
 
 ### Workers (BullMQ + sidecar)
 
@@ -411,6 +514,269 @@ anything the other modules inject. The same string-token pattern
 is used by `HealthModule` (`DATABASE_PING`, `REDIS_PING`) and
 `WorkersModule` (`BULLMQ_CONNECTION`).
 
+## Files (PR-N1)
+
+PR-N1 closes the NAS backend by exposing the book files behind a
+Range-aware HTTP endpoint so the desktop / mobile / web clients
+can resume partial downloads without re-fetching the entire
+archive.
+
+```
+GET  /api/files/:book_id   (Bearer required, Range optional)
+  Headers: Authorization: Bearer <jwt>
+           Range: bytes=0-1023  (optional — resumable downloads)
+           If-None-Match: "<etag>"   (optional — 304 short-circuit)
+  → 200 { body }                       full file
+  → 206 { body }                       partial content (Range)
+  → 304                                 not modified
+  → 404 { error: { code: 'FILE_NOT_FOUND' } }
+  → 416 { error: ..., Content-Range: bytes */<size> }
+  → 500 { error: { code: 'FILE_READ_ERROR' } }
+
+HEAD /api/files/:book_id   (Bearer required)
+  Headers: Authorization: Bearer <jwt>
+  → 200 (Content-Length, Content-Type, Accept-Ranges: bytes, ETag)
+```
+
+Every response carries `Accept-Ranges: bytes`, `ETag: "<hex-size>-<hex-mtime>"`,
+and `Last-Modified` so the client can resume, re-validate, or
+preload metadata in parallel with the download itself.
+
+### Path safety (4R review principle)
+
+`FilesService.resolveBookFilePath` rejects any stored path that
+escapes the configured library root (`NAS_LIBRARY_ROOT`, default
+`/share/biblioteca/raw/`) — including `..` traversal attempts and
+absolute paths that resolve outside the root. The check uses
+`path.resolve` so the prefix comparison is reliable across POSIX
+and Windows-style separators, and the failure surfaces as
+`404 FILE_NOT_FOUND` (intentionally vague so the configured root
+is not leaked).
+
+### Range parsing
+
+`FilesService.parseRangeHeader` accepts the byte-range subset of
+RFC 9110 §14.1.2:
+
+| Form                | Meaning                  |
+|---------------------|--------------------------|
+| `bytes=N-M`         | closed range             |
+| `bytes=N-`          | from N to EOF            |
+| `bytes=-N`          | last N bytes             |
+| multi-range         | NOT supported — 200 full |
+| syntactically broken | NOT a Range — 200 full   |
+| start ≥ fileSize    | 416 with `bytes */<size>`|
+
+### Module map addition
+
+| Module       | Controller routes                                       | Services        | Tokens                  |
+|--------------|---------------------------------------------------------|-----------------|-------------------------|
+| `FilesModule` | `GET /api/files/:book_id`, `HEAD /api/files/:book_id`   | `FilesService`  | `LIBRARY_ROOT`          |
+
+`FilesModule` imports `AuthModule` (for `JwtAuthGuard`) and
+`BooksModule` (for the re-exported `BOOKS_REPOSITORY` string
+token). The module is read-only against the books table — it
+looks up `books.file_path` and streams from disk; it never
+mutates a book row.
+
+## Libraries (PR-N2)
+
+PR-N2 closes the multi-library registry gap: the NAS now owns
+a `libraries` table that every book row can be scoped to, and
+each paired device picks one of the available libraries as
+its active browsing target. The HTTP surface is CRUD over
+`/api/libraries/*`; the per-device activation flag is
+stored in the `device_libraries` join table.
+
+```
+GET    /api/libraries               (Bearer required)
+  → 200 [LibraryDto, …]            ordered by id ASC
+  401:  { error: { code: 'UNAUTHORIZED' } }
+
+POST   /api/libraries               (Bearer required)
+  Body: { name: string, root_path: string }
+  → 201 LibraryDto
+  400:  empty/missing fields (global ValidationPipe)
+  401:  { error: { code: 'UNAUTHORIZED' } }
+
+GET    /api/libraries/:id           (Bearer required)
+  → 200 LibraryDto
+  404:  { error: { code: 'NOT_FOUND', message: 'Library not found' } }
+
+PATCH  /api/libraries/:id           (Bearer required)
+  Body: { name?: string, root_path?: string }   (at least one field)
+  → 200 LibraryDto
+  403:  caller is not the creator → { error: { code: 'FORBIDDEN', … } }
+  404:  { error: { code: 'NOT_FOUND' } }     row missing
+  404:  { error: { code: 'EMPTY_PATCH' } }   body has no fields
+
+DELETE /api/libraries/:id           (Bearer required)
+  → 204
+  403:  { error: { code: 'FORBIDDEN', … } }   caller is not the creator
+  404:  { error: { code: 'NOT_FOUND' } }      row missing
+  409:  { error: { code: 'LIBRARY_NOT_EMPTY', … } }   books still indexed
+
+PUT    /api/libraries/:id/active    (Bearer required)
+  → 200 LibraryDto
+  404:  { error: { code: 'NOT_FOUND' } }      row missing
+```
+
+The wire DTO is snake_case to match the rest of the API:
+
+```jsonc
+{
+  "id": 1,
+  "name": "Borges, Jorge Luis",
+  "root_path": "/share/biblioteca/raw/borges",
+  "created_by_device_id": "f2a3…",   // null for admin-imported rows
+  "created_at": "2026-06-29T22:45:00.000Z"
+}
+```
+
+### Authorisation model
+
+- **CREATE** is open to every paired device. The new row is
+  stamped with the caller's `device_id` so PATCH/DELETE can
+  match it later. There is no "library admin" role in this
+  slice — admin overrides (e.g. a SQL import) set
+  `created_by_device_id = NULL`, and only operators with DB
+  access can mutate those rows.
+- **PATCH** and **DELETE** are creator-only. The service
+  throws `ForbiddenException` (HTTP 403) when
+  `library.created_by_device_id !== req.device.deviceId`.
+- **DELETE** is refused with 409 `LIBRARY_NOT_EMPTY` when the
+  `books.library_id` count for that row is > 0. The defence
+  keeps the `books.library_id` FK (migration 014) from
+  dangling when an admin drops a library that still indexes
+  books.
+- **PUT /:id/active** is open to every paired device and is
+  idempotent. The repository flips every other `device_libraries`
+  row for the same device to `active = FALSE` in the same
+  transaction so at most one row per device is active.
+
+### Module map addition
+
+| Module           | Controller routes                                                  | Service           | Repositories + Adapters                                                                  |
+|------------------|--------------------------------------------------------------------|-------------------|------------------------------------------------------------------------------------------|
+| `LibrariesModule`| `GET/POST /api/libraries`, `GET/PATCH/DELETE /api/libraries/:id`, `PUT /api/libraries/:id/active` | `LibrariesService` | `LIBRARIES_REPOSITORY` (PgLibrariesRepository), `LIBRARY_BOOK_COUNT` (PgLibraryBookCountAdapter over `BOOKS_REPOSITORY.countByLibrary`), `DEVICES_LOOKUP` (PgDeviceLookupAdapter over `DEVICES_REPOSITORY.findByDeviceId`) |
+
+`LibrariesModule` imports `AuthModule` (for `JwtAuthGuard`),
+`DatabaseModule` (for `PG_POOL`), and `BooksModule` (for the
+`BOOKS_REPOSITORY` provider the `countByLibrary` adapter
+needs). The same string-token pattern as `BooksModule` makes
+the controller e2e suite stub all three seams with in-memory
+implementations.
+
+### Schema (PR-N2)
+
+| Migration                    | What it adds                                                                                          |
+|------------------------------|-------------------------------------------------------------------------------------------------------|
+| `012_libraries.sql`          | `libraries` table — `BIGSERIAL id`, `name`, `root_path`, `created_by_device_id UUID NULL`, `created_at`. Index on `created_by_device_id` (partial, `WHERE NOT NULL`). |
+| `013_device_libraries.sql`   | `device_libraries(device_id UUID, library_id BIGINT REFERENCES libraries(id) ON DELETE CASCADE, active BOOLEAN)` with composite PK + partial index on `(device_id, active)`. |
+| `014_books_library_id.sql`   | `ALTER TABLE books ADD COLUMN library_id BIGINT REFERENCES libraries(id)` + B-tree index. Column is NULLABLE so the MVP import path can land books before library resolution is known. |
+
+## Admin scan (PR-N4)
+
+PR-N4 closes the admin-driven scan surface: before this PR the
+only way to trigger a scan was via the filesystem watcher
+(PR-2E). Operators could not force a full rescan, request an
+incremental scan on a specific library, observe progress
+without tailing BullMQ, or cancel a running scan.
+
+The `scan_jobs` table (migration 016) is the durable record of
+every admin scan request. The HTTP layer (`/api/admin/scan/*`)
+is gated by `JwtAuthGuard` + `ScanAdminGuard` — every endpoint
+returns `403 ADMIN_REQUIRED` for a paired (but unprivileged)
+device. The BullMQ worker (`admin-scan` queue) walks
+`library.root_path` cooperatively, observing the `cancelled`
+flag between files; the SSE endpoint multiplexes the
+`ScanEventBus` so the iPad client gets a per-job progress
+channel.
+
+### Endpoints
+
+| Method | Path                                  | Auth      | Status | Body                                        |
+|--------|---------------------------------------|-----------|--------|---------------------------------------------|
+| POST   | `/api/admin/scan/full`                | admin     | 202    | `{}` (no library_id → whole-NAS scan)       |
+| POST   | `/api/admin/scan/incremental`         | admin     | 202    | `{ "library_id": <int> }` (required)        |
+| GET    | `/api/admin/scan/status`              | admin     | 200    | `{ jobs: ScanJobDto[] }` (newest first)     |
+| GET    | `/api/admin/scan/status/:job_id`      | admin     | 200/404| `{ job: ScanJobDto }` or 404 NOT_FOUND      |
+| POST   | `/api/admin/scan/cancel/:job_id`      | admin     | 200    | `{ cancelled: bool }` (true / false)        |
+| GET    | `/api/admin/scan/events/:job_id`      | admin     | 200/404| SSE stream of `ScanProgressEvent` objects   |
+
+Every non-`events` endpoint returns `{ job_id }` (or the
+appropriate response body) on success. Non-admin bearers get
+`{ error: { code: "ADMIN_REQUIRED", message: "admin role required" } }`
+with HTTP 403. Missing or invalid Bearer tokens get
+`{ error: { code: "UNAUTHORIZED", message: "..." } }` with HTTP 401.
+
+### Wire shapes
+
+**`ScanJobDto`** (returned by `GET /status` and `GET /status/:id`):
+
+```jsonc
+{
+  "id": "11111111-1111-1111-1111-111111111111",
+  "library_id": 7,                  // null for whole-NAS scans
+  "kind": "full",                   // "full" | "incremental"
+  "status": "running",              // queued | running | done | cancelled | failed
+  "started_at": "2026-06-29T12:00:00Z",
+  "finished_at": null,
+  "total_files": 1024,
+  "processed_files": 256,
+  "cancelled": false,
+  "error": null                     // populated when status == "failed"
+}
+```
+
+**`ScanProgressEvent`** (SSE `data:` payload):
+
+```jsonc
+{
+  "jobId": "11111111-1111-1111-1111-111111111111",
+  "type": "progress",               // progress | done | cancelled | failed
+  "processed": 256,
+  "total": 1024,                    // null until the worker finishes walking
+  "error": "...",                   // only on "failed"
+  "timestamp": "2026-06-29T12:00:01Z"
+}
+```
+
+The SSE stream sends each event as two lines:
+
+```
+event: progress
+data: {"jobId":"...","type":"progress","processed":256,"total":1024,"timestamp":"..."}
+
+```
+
+The server closes the response when:
+1. The client disconnects (`res.on('close')`),
+2. The job reaches a terminal status — the bus delivers the
+   matching event and we `res.end()`, or
+3. The initial row lookup fails (`404 NOT_FOUND`).
+
+For a job that is already terminal when a client connects, the
+controller synthesises the final event from the row so late
+subscribers still get a single deterministic event.
+
+### Cooperative cancellation
+
+The worker checks the `cancelled` flag between files. The
+controller flips the flag via `POST /api/admin/scan/cancel/
+:job_id`; the worker observes it on the next iteration and
+transitions to `cancelled` without touching any further file.
+A cancel request against a job already in a terminal status
+(`done` / `failed` / `cancelled`) returns `{ cancelled:
+false }` — flipping the flag after the worker has finished
+would race with the worker's own bookkeeping.
+
+### Migrations
+
+| Migration                    | What it adds                                                                                          |
+|------------------------------|-------------------------------------------------------------------------------------------------------|
+| `016_admin_scan_jobs.sql`    | `scan_jobs(id UUID PK, library_id BIGINT REFERENCES libraries(id) NULL, kind CHECK ('full','incremental'), status CHECK ('queued','running','done','cancelled','failed'), started_at / finished_at TIMESTAMPTZ, total_files INT, processed_files INT DEFAULT 0, cancelled BOOLEAN DEFAULT FALSE, error TEXT)`. Indexes on `status` (admin list endpoint, worker pickup loop) and `library_id` (per-library history view). |
+
 ## Migrations
 
 Every schema change ships as a numbered SQL file under
@@ -445,7 +811,7 @@ DATABASE_URL=… npm run migrate
 | `/readyz` | `readinessProbe` | Postgres reachable (Redis-down OK) | Postgres down    |
 | `/health` | operator curl    | Postgres + Redis both reachable      | either down      |
 
-Files shipped in PR-2B + PR-2C:
+Files shipped in PR-2B + PR-2C + PR-N2:
 
 | File | What it does |
 |------|--------------|
@@ -460,6 +826,10 @@ Files shipped in PR-2B + PR-2C:
 | `009_seed_categories.sql` | bilingual taxonomy seed (Ciencia, Arte, Literatura, …) |
 | `010_devices.sql` | `devices` table — UUID + SHA-256 token hash + INET ip_address |
 | `011_pgroonga_defrag.sql` | `pgroonga_index_defrag(text)` helper + nightly pg_cron job at 03:00 UTC (4R review #43) |
+| `012_libraries.sql` | `libraries` table — BIGSERIAL id + name + root_path + created_by_device_id (UUID NULL) + created_at |
+| `013_device_libraries.sql` | `device_libraries` join — composite PK + ON DELETE CASCADE + partial index on `(device_id, active)` |
+| `014_books_library_id.sql` | `books.library_id` (nullable FK to libraries) + B-tree index |
+| `015_devices_is_admin.sql` | `devices.is_admin BOOLEAN DEFAULT FALSE NOT NULL` — admin gate for `/api/downloads/stats` + `/api/downloads/by-book/:book_id` (PR-N3) |
 
 ### pgroonga ops runbook (4R review #43)
 
@@ -560,11 +930,12 @@ pgroonga instance.
 | Repository | Methods |
 |------------|---------|
 | `AuthorsRepository` | `insert`, `findById`, `list`, `count` |
-| `BooksRepository` | `insert`, `findById`, `listByAuthor`, `list` (+filters), `count`, `search` |
+| `BooksRepository` | `insert`, `findById`, `listByAuthor`, `list` (+filters incl. `libraryId`), `count`, `search`, `countByLibrary` |
 | `CategoriesRepository` | `insert`, `findByPath`, `listChildren`, `listRoots`, `listForBook`, `findSubtree` (recursive CTE) |
 | `SagasRepository` | `insert`, `attachBook` (idempotent), `listByAuthor`, `listForBook`, `listBooksInSaga` |
-| `DownloadsRepository` | `insert`, `markCompleted`, `updateProgress`, `listByDevice`, `findById`, `findCompletedForDeviceAndBook`, `stats` |
-| `DevicesRepository` | `insert`, `findByDeviceId`, `updateTokenHash`, `touch` |
+| `DownloadsRepository` | `insert`, `markCompleted`, `updateProgress`, `listByDevice`, `listForDevice` (PR-N3), `findById`, `findByBookId` (PR-N3), `findCompletedForDeviceAndBook`, `topDevicesForBook` (PR-N3), `stats` |
+| `DevicesRepository` | `insert`, `findByDeviceId`, `updateTokenHash`, `touch`, `isAdmin` (PR-N3) |
+| `LibrariesRepository` | `list`, `findById`, `insert`, `update`, `delete`, `setActiveForDevice`, `getActiveForDevice`, `listForDevice` |
 | `SearchRepository` | `search` (pgroonga `&@~` + `pgroonga.score(tableoid)`) |
 
 ## Auth (PR-2C, hardened PR-2F.1)
@@ -572,8 +943,33 @@ pgroonga instance.
 The auth module issues a per-device bearer token after a one-time
 PIN pairing. Every endpoint other than `GET /health`,
 `GET /livez`, `GET /readyz`, `GET /api/discovery/info`,
-`POST /api/auth/pair`, and `POST /api/auth/refresh` requires a
-valid `Authorization: Bearer <jwt>` header.
+`GET /metrics`, `POST /api/auth/pair`, and `POST /api/auth/refresh`
+requires a valid `Authorization: Bearer <jwt>` header.
+
+## Observability (PR-N7, issue #92)
+
+The `ObservabilityModule` exposes a Prometheus-compatible metrics
+endpoint at `GET /metrics`. The endpoint is intentionally
+unauthenticated so scrapers (Prometheus, Grafana Agent, etc.) can
+poll without managing a bearer token; operators who want to lock
+it down must front it with a network-level ACL (firewall or
+Tailscale ACL).
+
+Exposed metrics:
+
+```
+http_requests_total{method,path,status}            counter
+http_request_duration_seconds                      histogram
+scan_jobs_total{status}                            counter
+scan_job_duration_seconds                          histogram
+downloads_total{state}                             counter
+download_bytes                                     histogram
+```
+
+`request_id` propagation: the global request middleware honours
+an inbound `X-Request-Id` header (or mints a UUID v4) and seeds
+an `AsyncLocalStorage` so every Pino log line emitted during the
+request carries `{request_id, route, method}`.
 
 ### Endpoints
 
