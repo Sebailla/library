@@ -10,6 +10,7 @@ import {
   DownloadStats,
   DownloadsRepository,
   NewDownload,
+  TopDeviceForBook,
 } from './downloads.repository';
 
 /** Result returned by ``POST /api/downloads``. */
@@ -187,17 +188,27 @@ export class DownloadsService {
    * PR-N3 — top devices that downloaded a given book.
    *
    * Default limit is ``10`` so the admin endpoint stays cheap
-   * even on a heavily-shared book. The full implementation lands
-   * in the next commit (Fake It for now so the controller
-   * compiles); until then the endpoint returns an empty list.
+   * even on a heavily-shared book. The repository aggregates
+   * count + last_downloaded_at per ``(book_id, device_id)`` in
+   * one round-trip; the service just maps to the wire shape.
    */
   async topDevicesForBook(
     bookId: number,
     limit: number = 10,
   ): Promise<TopDevicesForBookResponse> {
-    void bookId;
-    void limit;
-    return { book_id: bookId, top_devices: [] };
+    const rows: TopDeviceForBook[] = await this.downloads.topDevicesForBook(
+      bookId,
+      limit,
+    );
+    return {
+      book_id: bookId,
+      top_devices: rows.map((row) => ({
+        device_id: row.deviceId,
+        device_name: row.deviceName,
+        count: row.count,
+        last_downloaded_at: row.lastDownloadedAt.toISOString(),
+      })),
+    };
   }
 
   /** Newest-first history of every download for a given device. */

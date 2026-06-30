@@ -57,6 +57,9 @@ class StubDownloadsRepository {
   async stats() {
     return { total: 0, completed: 0, top_books: [], top_devices: [] };
   }
+  async topDevicesForBook() {
+    return [];
+  }
   async close() {
     /* no-op */
   }

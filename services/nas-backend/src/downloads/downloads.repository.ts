@@ -39,6 +39,24 @@ export interface DownloadStats {
   top_devices: Array<{ device_id: string; count: number }>;
 }
 
+/**
+ * PR-N3 — single row in the response to
+ * ``GET /api/downloads/by-book/:book_id``.
+ *
+ * One row per device that has downloaded the book. ``count`` is
+ * the number of download rows (including in-progress) attributed
+ * to ``(device_id, book_id)``. ``lastDownloadedAt`` is the most
+ * recent ``downloaded_at`` for that pair — useful for the admin
+ * dashboard to surface "active readers" vs "downloaded-once-
+ * then-stale" devices.
+ */
+export interface TopDeviceForBook {
+  deviceId: string;
+  deviceName: string | null;
+  count: number;
+  lastDownloadedAt: Date;
+}
+
 interface DownloadRow {
   id: string | number;
   book_id: string | number;
@@ -115,6 +133,15 @@ export interface DownloadsRepository {
     bookId: number,
   ): Promise<Download | null>;
   stats(): Promise<DownloadStats>;
+  /**
+   * PR-N3 — top devices for a given book. Powers
+   * ``GET /api/downloads/by-book/:book_id`` (admin-only). Returns
+   * at most ``limit`` rows, ordered by ``count`` DESC then
+   * ``device_id`` ASC for ties. Rows with ``device_id IS NULL``
+   * (legacy / unattributable) are excluded so the response is
+   * always a clean per-device ranking.
+   */
+  topDevicesForBook(bookId: number, limit: number): Promise<TopDeviceForBook[]>;
   close(): Promise<void>;
 }
 
@@ -242,6 +269,42 @@ export class PgDownloadsRepository implements DownloadsRepository {
         count: Number(r.count),
       })),
     };
+  }
+
+  async topDevicesForBook(
+    bookId: number,
+    limit: number,
+  ): Promise<TopDeviceForBook[]> {
+    // Two aggregates against the same index (idx_downloads_book):
+    //   COUNT(*) per (device_id, book_id) — for ``count``.
+    //   MAX(downloaded_at) per (device_id, book_id) — for ``last_downloaded_at``.
+    // ``device_id IS NOT NULL`` excludes legacy / unattributable
+    // rows from the ranking. The tie-break on ``device_id`` ASC
+    // matches the per-book stats endpoint so the two surfaces
+    // behave consistently for the same book.
+    const res = await this.pool.query<{
+      device_id: string;
+      device_name: string | null;
+      count: string;
+      last_downloaded_at: Date;
+    }>(
+      `SELECT device_id,
+              MAX(device_name) AS device_name,
+              COUNT(*)::text AS count,
+              MAX(downloaded_at) AS last_downloaded_at
+       FROM downloads
+       WHERE book_id = $1 AND device_id IS NOT NULL
+       GROUP BY device_id
+       ORDER BY COUNT(*) DESC, device_id ASC
+       LIMIT $2`,
+      [bookId, limit],
+    );
+    return res.rows.map((row) => ({
+      deviceId: row.device_id,
+      deviceName: row.device_name,
+      count: Number(row.count),
+      lastDownloadedAt: row.last_downloaded_at,
+    }));
   }
 
   async close(): Promise<void> {

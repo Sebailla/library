@@ -288,6 +288,66 @@ class InMemoryDownloadsRepository {
     return { total, completed, top_books, top_devices };
   }
 
+  /**
+   * PR-N3 — in-memory mirror of the production
+   * ``topDevicesForBook`` contract. Mirrors the SQL semantics:
+   * group by ``device_id``, exclude rows with ``device_id IS NULL``,
+   * order by count DESC then ``device_id`` ASC.
+   */
+  async topDevicesForBook(
+    bookId: number,
+    limit: number,
+  ): Promise<
+    Array<{
+      deviceId: string;
+      deviceName: string | null;
+      count: number;
+      lastDownloadedAt: Date;
+    }>
+  > {
+    const groups = new Map<
+      string,
+      {
+        deviceName: string | null;
+        count: number;
+        lastDownloadedAt: Date;
+      }
+    >();
+    for (const row of this.rows) {
+      if (row.bookId !== bookId || row.deviceId === null) continue;
+      const existing = groups.get(row.deviceId);
+      if (existing) {
+        existing.count += 1;
+        if (row.downloadedAt > existing.lastDownloadedAt) {
+          existing.lastDownloadedAt = row.downloadedAt;
+        }
+        // Take the most recently-set device_name; if any of the
+        // matching rows carries a non-null name, surface it.
+        if (existing.deviceName === null && row.deviceName !== null) {
+          existing.deviceName = row.deviceName;
+        }
+      } else {
+        groups.set(row.deviceId, {
+          deviceName: row.deviceName,
+          count: 1,
+          lastDownloadedAt: row.downloadedAt,
+        });
+      }
+    }
+    return [...groups.entries()]
+      .map(([deviceId, value]) => ({
+        deviceId,
+        deviceName: value.deviceName,
+        count: value.count,
+        lastDownloadedAt: value.lastDownloadedAt,
+      }))
+      .sort((a, b) => {
+        if (b.count !== a.count) return b.count - a.count;
+        return a.deviceId.localeCompare(b.deviceId);
+      })
+      .slice(0, limit);
+  }
+
   async close(): Promise<void> {}
 }
 
@@ -1182,6 +1242,95 @@ describe('PR-N3 admin gate on /api/downloads/*', () => {
         .expect(200);
       expect(res.body.book_id).toBe(book.id);
       expect(res.body.top_devices).toEqual([]);
+    } finally {
+      await app.close();
+    }
+  });
+
+  /**
+   * Triangulation — when there ARE rows, the response MUST rank
+   * the devices by count DESC with a stable ``device_id`` ASC
+   * tie-break. The fixture seeds three devices (3, 2, 1
+   * downloads respectively); the assertions pin the wire shape
+   * so a future refactor cannot silently break the contract.
+   */
+  it('GET /api/downloads/by-book/:book_id returns ranked top_devices when rows exist', async () => {
+    const { app, books, downloads, promoteToAdmin } = await buildAppWithAdminFlag();
+    try {
+      const book = await seedBook(books, {
+        title: 'Ficciones',
+        filePath: '/lib/ficciones.epub',
+      });
+      const pair = await request(app.getHttpServer())
+        .post('/api/auth/pair')
+        .send({ pin: '12345678', device_name: 'Admin' })
+        .expect(201);
+      const adminDeviceId = pair.body.device_id as string;
+      const token = pair.body.token as string;
+      promoteToAdmin(adminDeviceId);
+
+      const deviceA = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
+      const deviceB = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb';
+      const deviceC = 'cccccccc-cccc-cccc-cccc-cccccccccccc';
+
+      // 3 downloads from A, 2 from B, 1 from C. Seeded via the
+      // repository because 4R #42 stripped the body fields.
+      for (let i = 0; i < 3; i++) {
+        await downloads.insert({
+          bookId: book.id,
+          deviceId: deviceA,
+          deviceName: 'A',
+          fileSizeBytes: 100,
+        });
+      }
+      for (let i = 0; i < 2; i++) {
+        await downloads.insert({
+          bookId: book.id,
+          deviceId: deviceB,
+          deviceName: 'B',
+          fileSizeBytes: 100,
+        });
+      }
+      await downloads.insert({
+        bookId: book.id,
+        deviceId: deviceC,
+        deviceName: 'C',
+        fileSizeBytes: 100,
+      });
+
+      const res = await request(app.getHttpServer())
+        .get(`/api/downloads/by-book/${book.id}`)
+        .set('Authorization', `Bearer ${token}`)
+        .expect(200);
+      expect(res.body.book_id).toBe(book.id);
+      const top = res.body.top_devices as Array<{
+        device_id: string;
+        device_name: string;
+        count: number;
+        last_downloaded_at: string;
+      }>;
+      expect(top).toHaveLength(3);
+      expect(top[0]).toMatchObject({
+        device_id: deviceA,
+        device_name: 'A',
+        count: 3,
+      });
+      expect(top[1]).toMatchObject({
+        device_id: deviceB,
+        device_name: 'B',
+        count: 2,
+      });
+      expect(top[2]).toMatchObject({
+        device_id: deviceC,
+        device_name: 'C',
+        count: 1,
+      });
+      // last_downloaded_at MUST be a parseable ISO timestamp
+      // for every row so the admin dashboard can render it
+      // without a second call.
+      for (const row of top) {
+        expect(() => new Date(row.last_downloaded_at).toISOString()).not.toThrow();
+      }
     } finally {
       await app.close();
     }
