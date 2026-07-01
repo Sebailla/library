@@ -174,7 +174,8 @@ Para el walkthrough completo de QNAP + Container Station ver
 | `latest` no se actualizó | El build no era desde `main` (los tags de release nunca setean `latest`) | Pusheá el tag desde `main`, o dispará un `workflow_dispatch` desde `main`. |
 | `pull access denied for sebailla001/alejandria-nas-bockend` local | Typo en el nombre (`bockend` vs `backend`) | El nombre es intencionalmente `nas-bockend` (typo del lado del registry) — matchealo exactamente. |
 | El host ARM64 no puede pull-ear la imagen | El tag publicado es anterior a la migración multi-arch | Re-pull — los tags actuales traen `linux/amd64` y `linux/arm64`. |
-| Warning `Node.js 20 is deprecated` en los logs del workflow | La toolchain default del runner es Node 20; la deprecation es solo informativa | Bumpeá `actions/checkout`, `docker/setup-qemu-action`, `docker/setup-buildx-action` y `docker/build-push-action` a `v5`/`v6` (ya hecho en el workflow actual). La build de la imagen sigue usando `node:20-bookworm-slim` dentro de Docker — esa imagen base Node 20 sigue soportada por un buen tiempo. |
+| Warning `Node.js 20 is deprecated` en los logs del workflow | La toolchain default del runner es Node 20; la deprecation es solo informativa | Bumpeá `actions/checkout` a `v5` y `docker/build-push-action` a `v6` (las docker setup actions ya están en `v4`, que es la última publicada — no hay `v5`). La build de la imagen sigue usando `node:20-bookworm-slim` dentro de Docker — esa imagen base Node 20 sigue soportada por un buen tiempo. |
+| `Unable to resolve action docker/setup-buildx-action@v5, unable to find version v5` (o `setup-qemu-action@v5`) | Un commit anterior bumpeó esas actions a `v5` pero solo `v3`/`v4` están publicadas | Usá `docker/setup-qemu-action@v4` y `docker/setup-buildx-action@v4` (la última publicada). |
 
 ---
 
