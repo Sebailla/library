@@ -103,6 +103,62 @@ rm -rf ~/Library/Logs/alejandria
 
 The next launch will pick up new pairing credentials again.
 
+## Building a distributable
+
+The Mac app can be packaged in three ways. Pick the one that matches
+your release goal.
+
+### 1. Quick zip (no codesign, dev/testing)
+
+```bash
+cd apps/mac
+npm install
+npm run package
+# Produces out/make/Alejandría-darwin-*/Alejandría.app/Contents/MacOS/alejandria
+# Plus out/make/Alejandría-darwin-x64.zip
+```
+
+### 2. Unsigned .dmg (dev/testing)
+
+```bash
+cd apps/mac
+npm install
+npm run dist:mac:unsigned
+# Produces out/Alejandría-0.1.0.dmg (or version-appropriate)
+```
+
+### 3. Codesigned + notarized .dmg (production)
+
+```bash
+# Set credentials (see BUILD.md for full env vars)
+export MACOS_CODESIGN_IDENTITY="Developer ID Application: Sebailla (XXXXXXXXXX)"
+export APPLE_ID="sebailla@example.com"
+export APPLE_ID_PASSWORD="abcd-efgh-ijkl-mnop"
+export APPLE_TEAM_ID="XXXXXXXXXX"
+
+cd apps/mac
+npm run dist:mac:sign
+# Produces out/Alejandría-0.1.0.dmg, codesigned and notarized
+```
+
+### Installing the app
+
+After producing the .dmg:
+
+1. Open the .dmg (double-click in Finder)
+2. Drag `Alejandría.app` to `/Applications`
+3. Eject the .dmg
+4. Open the app from `/Applications` (or Launchpad)
+
+The custom icon (a stylised open book on warm parchment) will appear
+in Finder, Dock, and Launchpad.
+
+## Updating the app icon
+
+1. Edit `apps/mac/build-resources/icon.png` (any image editor, 1024x1024 min)
+2. Run `python3 apps/mac/scripts/generate-icon.py` to regenerate the .icns + iconset
+3. Re-run `npm run package` or `npm run dist:mac:unsigned`
+
 ## For contributors — architecture and scripts
 
 ```

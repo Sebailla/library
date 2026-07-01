@@ -36,6 +36,12 @@ publish:
 
 mac:
   category: public.app-category.education
+  # Custom app icon — same .icns as forge.config.ts (issue #112).
+  # electron-builder packs it into the .app's Info.plist so Finder,
+  # Dock, and Launchpad show the icon. Keep the path identical to the
+  # forge.config.ts reference so a designer can regenerate the .icns
+  # once and both packaging tools pick it up.
+  icon: build-resources/icon.icns
   target:
     - target: dmg
       arch:
