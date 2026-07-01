@@ -36,8 +36,12 @@ const config: ForgeConfig = {
     executableName: 'alejandria',
     appBundleId: 'com.alejandria.app',
     appCategoryType: 'public.app-category.education',
-    // The icon will be added in a follow-up PR (PR-4D). For now
-    // we let electron-forge pick the default.
+    // Custom app icon — stylised open book on warm parchment. The path
+    // is relative to this file (apps/mac/) and points at the .icns that
+    // `scripts/generate-icon.py` regenerates. Both electron-forge and
+    // electron-builder consume the same .icns so a designer can swap
+    // build-resources/icon.png once and rebuild both targets.
+    icon: 'build-resources/icon.icns',
     protocols: [
       {
         name: 'alejandria',
