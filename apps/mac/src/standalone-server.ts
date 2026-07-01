@@ -31,7 +31,7 @@
 import { createServer } from 'node:net'
 import { createConnection } from 'node:net'
 import { join } from 'node:path'
-import { existsSync } from 'node:fs'
+import { existsSync, readdirSync, statSync } from 'node:fs'
 import { spawn as defaultSpawn, type ChildProcess } from 'node:child_process'
 
 /**
@@ -42,11 +42,13 @@ import { spawn as defaultSpawn, type ChildProcess } from 'node:child_process'
 const STANDALONE_RESOURCES_SUBDIR = 'standalone'
 
 /**
- * The relative path inside the standalone directory that holds the
- * Next.js server entry. Next.js writes `<standalone>/apps/web/server.js`
- * (mirroring the source tree).
+ * The leaf directory name that Next.js uses for the web app in
+ * the standalone output. Next.js 16 mirrors the project's cwd
+ * verbatim under `.next/standalone/`, so the entry point is
+ * somewhere under `<standalone>/<cwd>/apps/web/server.js` —
+ * the `apps/web/` part is the same on every machine.
  */
-const STANDALONE_SERVER_ENTRY = join('apps', 'web', 'server.js')
+const WEB_APP_LEAF = join('apps', 'web')
 
 /**
  * Default host to bind the standalone server to. `127.0.0.1` is
@@ -71,22 +73,86 @@ export type SpawnFn = (
 
 /**
  * Resolve the absolute path to the Next.js standalone server entry
- * script. Looks for `<standaloneDir>/apps/web/server.js` (the layout
- * Next.js produces when `output: 'standalone'` is on).
+ * script.
  *
- * Throws if the entry script does not exist — failing loudly is the
- * right behaviour at package time, since a missing entry means the
- * `.app` will crash on launch.
+ * Next.js 16's standalone output mirrors the build's working
+ * directory under `.next/standalone/`. When the build runs from
+ * `apps/web/`, the entry lands at
+ * `<standaloneDir>/<cwd>/apps/web/server.js` — but the `<cwd>`
+ * fragment is whatever absolute path the build saw, so it can be
+ * deep (`/Users/<name>/Documents/Proyectos/.../apps/web`) on
+ * developer machines or shallow on CI. The `apps/web/server.js`
+ * leaf is the stable piece, so we walk the standalone directory
+ * looking for that leaf.
+ *
+ * Throws if the entry script does not exist — failing loudly is
+ * the right behaviour at package time, since a missing entry means
+ * the `.app` will crash on launch.
  */
 export function resolveStandaloneEntry({ standaloneDir }: { standaloneDir: string }): string {
-  const entry = join(standaloneDir, STANDALONE_SERVER_ENTRY)
-  if (!existsSync(entry)) {
+  const entry = findStandaloneEntry(standaloneDir)
+  if (entry === null) {
     throw new Error(
-      `standalone server entry not found at ${entry}. ` +
+      `standalone server entry not found under ${standaloneDir}. ` +
         'Did you forget to run "npm --prefix ../web run build:standalone"?',
     )
   }
   return entry
+}
+
+/**
+ * Walk a directory tree looking for `<...>/apps/web/server.js`.
+ * Returns the first match, or `null` if no entry exists.
+ *
+ * Bounded by the fact that `node_modules/` is huge but its
+ * `server.js` files live under `next/dist/...`, NOT under
+ * `apps/web/`, so the leaf-name filter naturally skips them.
+ */
+function findStandaloneEntry(standaloneDir: string): string | null {
+  if (!existsSync(standaloneDir) || !statSync(standaloneDir).isDirectory()) {
+    return null
+  }
+
+  // Shallow check first — handles the case where the build was
+  // invoked from a directory whose top-level is already the web
+  // app's parent (e.g. when someone runs `next build` from
+  // `apps/web/` and the cwd is captured as just `apps/web`).
+  const shallow = join(standaloneDir, WEB_APP_LEAF, 'server.js')
+  if (existsSync(shallow) && statSync(shallow).isFile()) {
+    return shallow
+  }
+
+  // Deep walk — Next.js 16 mirrors the absolute cwd, so the
+  // real entry is somewhere under `<standaloneDir>/<cwd-mirror>/`.
+  const stack: string[] = [standaloneDir]
+  while (stack.length > 0) {
+    const dir = stack.pop()
+    if (dir === undefined) break
+    let entries: string[]
+    try {
+      entries = readdirSync(dir)
+    } catch {
+      continue
+    }
+    for (const name of entries) {
+      if (name === 'node_modules' || name === '.cache') continue
+      const child = join(dir, name)
+      let st
+      try {
+        st = statSync(child)
+      } catch {
+        continue
+      }
+      if (st.isDirectory()) {
+        stack.push(child)
+        continue
+      }
+      if (st.isFile() && name === 'server.js' && dir.endsWith(WEB_APP_LEAF)) {
+        return child
+      }
+    }
+  }
+  return null
 }
 
 /**

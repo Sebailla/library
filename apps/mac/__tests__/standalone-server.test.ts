@@ -79,6 +79,48 @@ describe('standalone-server (PR-fix-mac-window-standalone-bundle)', () => {
     expect(entry).toBe(join(serverDir, 'server.js'))
   })
 
+  it('resolveStandaloneEntry finds server.js nested under a mirrored cwd (Next.js 16 layout)', async () => {
+    const { resolveStandaloneEntry } = await import('../src/standalone-server')
+    // Next.js 16 mirrors the absolute cwd under standalone/. On a
+    // developer machine the mirror can be deep (e.g. /Users/<name>/...
+    // /biblioteca-v2). The resolver MUST walk the tree.
+    const standaloneDir = join(workDir, '.next', 'standalone')
+    const mirror = join(standaloneDir, 'Users', 'sebailla', 'Documents', 'biblioteca-v2')
+    const serverDir = join(mirror, 'apps', 'web')
+    mkdirSync(serverDir, { recursive: true })
+    writeFileSync(join(serverDir, 'server.js'), '// real next server entry')
+
+    const entry = resolveStandaloneEntry({ standaloneDir })
+    expect(entry).toBe(join(serverDir, 'server.js'))
+  })
+
+  it('resolveStandaloneEntry skips node_modules/.../server.js and prefers the web app entry', async () => {
+    const { resolveStandaloneEntry } = await import('../src/standalone-server')
+    const standaloneDir = join(workDir, '.next', 'standalone')
+    // An incidental `next` package's server.js (NOT the entry).
+    const incidental = join(
+      standaloneDir,
+      'Users',
+      'sebailla',
+      'apps',
+      'web',
+      'node_modules',
+      'next',
+      'dist',
+      'experimental',
+      'testmode',
+    )
+    mkdirSync(incidental, { recursive: true })
+    writeFileSync(join(incidental, 'server.js'), '// incidental — NOT the entry')
+    // The real entry one level shallower.
+    const real = join(standaloneDir, 'Users', 'sebailla', 'apps', 'web')
+    mkdirSync(real, { recursive: true })
+    writeFileSync(join(real, 'server.js'), '// real next server entry')
+
+    const entry = resolveStandaloneEntry({ standaloneDir })
+    expect(entry).toBe(join(real, 'server.js'))
+  })
+
   it('resolveStandaloneEntry throws when server.js is missing', async () => {
     const { resolveStandaloneEntry } = await import('../src/standalone-server')
     expect(() =>
