@@ -336,7 +336,31 @@ services:
 
 ## 6. Levantar los servicios
 
-### 6.1 Build + start
+Hay **dos formas** de levantar el stack. La primera (build local) requiere que tengas el código fuente en el QNAP. La segunda (pull desde Docker Hub) es la recomendada para instalaciones nuevas — más rápida y no requiere compilar nada.
+
+### 6.1 Opción A: Pull desde Docker Hub (recomendado)
+
+La imagen `sebailla001/alejandria-nas-bockend` se publica automáticamente en Docker Hub en cada release tag del repo de GitHub. La imagen ya incluye `pgroonga + pg_cron` en su Dockerfile, y el `docker-compose.yml` la pull directo.
+
+**Verificá que tenés las credenciales en `.env`** (ver paso 5.2) y que la imagen existe en Docker Hub.
+
+```bash
+cd /share/alejandria-app/services/nas-backend
+
+# Pull la imagen publicada (tag = tu release)
+docker pull sebailla001/alejandria-nas-bockend:v0.5.1
+
+# Levantar (usa la imagen pulleda, no build local)
+docker compose up -d
+```
+
+La diferencia clave: el `docker-compose.yml` ya está configurado para hacer `image: sebailla001/alejandria-nas-bockend:v0.5.1` (en vez de `build: .`). Si querés volver a build local, editá el compose y descomentá el bloque `build:`.
+
+> **Nota sobre la imagen Postgres**: el compose usa `groonga/pgroonga:latest-debian-16` con un `Dockerfile.pg` overlay que agrega `pg_cron`. El overlay se construye en build local; la imagen final queda taggeada como `alejandria-nas-backend-postgres:pgroonga-pgcron`. Si querés skip el build del overlay, cambiá el `image:` del servicio postgres por `groonga/pgroonga:latest-debian-16` directo (la migración 011 downgrade a NOTICE en ese caso).
+
+### 6.2 Opción B: Build local
+
+Solo si querés customizar el código o si tu release no está todavía en Docker Hub.
 
 ```bash
 cd /share/alejandria-app/services/nas-backend

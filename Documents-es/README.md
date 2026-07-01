@@ -12,6 +12,8 @@ biblioteca-v2/
 ├── services/
 │   ├── extractors-py/   PR1 — CLI del sidecar Python
 │   └── nas-backend/     PR2 — NestJS + Postgres + Redis + workers
+│                         Publicado en docker.io/sebailla001/alejandria-nas-bockend
+│                         en cada tag v* (ver DOCKERHUB_SETUP.md)
 ├── apps/
 │   ├── web/             PR3 — App Router de Next.js 16 + React 19
 │   └── mac/             PR4 — Shell de Electron que envuelve apps/web
@@ -19,6 +21,11 @@ biblioteca-v2/
     ├── core/types/      Tipos TS compartidos que reflejan alejandria/core/models.py
     └── sidecar/         Spawn + sanitización de paths compartidos (PR-3-fix-B)
 ```
+
+El contenedor del backend NAS se publica en Docker Hub con cada tag
+`v*`. Ver [DOCKERHUB_SETUP.md](DOCKERHUB_SETUP.md) (espejo en español:
+[Documents-es/DOCKERHUB_SETUP.md](Documents-es/DOCKERHUB_SETUP.md))
+para el paso a paso de configuración.
 
 ## Estado de los PR
 
@@ -32,6 +39,7 @@ biblioteca-v2/
 | PR-4A | Pipeline de resolución de ISBN de 7 capas (`apps/web/lib/isbn-resolver/`) | Merged |
 | PR-4B | Capa de sync de actividad en iCloud Drive (`apps/web/lib/sync/`) | **Este PR** |
 | PR4 | Shell de Electron + iCloud Drive + ISBN pipeline de 7 capas | Pendiente |
+| Publicación Docker Hub | Imagen multi-arch de `alejandria-nas-bockend` en Docker Hub vía `.github/workflows/docker-publish.yml` (issue #106) | **Este PR** |
 
 ## Ejecutar `apps/web/` (PR-3C)
 

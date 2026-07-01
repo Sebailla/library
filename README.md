@@ -17,8 +17,10 @@ for the full changelog. Local user guide: [Documents-es/USER_GUIDE.md](Documents
 ```
 biblioteca-v2/
 ├── services/
-│   ├── extractors-py/   v0.1.0 — Python sidecar CLI (12 extractor wrappers + OCR)
+│   ├── extractors-py/   v0.1.0 — Python sidecar CLI
 │   └── nas-backend/     v0.2.0/v0.5.0/v0.5.1 — NestJS + Postgres + Redis + workers + admin surface
+│                         Published to docker.io/sebailla001/alejandria-nas-bockend
+│                         on every v* tag (see DOCKERHUB_SETUP.md)
 ├── apps/
 │   ├── web/             v0.3.0 — Next.js 16 + React 19 App Router (browse, search, reader, ISBN, iCloud sync)
 │   └── mac/             v0.4.0/v0.5.0 — Electron 33 shell wrapping apps/web (IPC, codesign, notarize, electron-updater)
@@ -26,6 +28,11 @@ biblioteca-v2/
     ├── core/types/      Shared TS types mirroring alejandria/core/models.py
     └── sidecar/         Shared sidecar spawn + path sanitization (used by nas-backend + apps/web)
 ```
+
+The NAS backend container is published to Docker Hub on every `v*` tag.
+See [DOCKERHUB_SETUP.md](DOCKERHUB_SETUP.md) (Spanish mirror:
+[Documents-es/DOCKERHUB_SETUP.md](Documents-es/DOCKERHUB_SETUP.md))
+for the setup walkthrough.
 
 ## PR status
 
@@ -42,6 +49,7 @@ biblioteca-v2/
 | PR-4D | Production build + codesign + electron-updater (`apps/mac/`) | Merged | v0.4.0 |
 | PR-N1..N8 | NAS backend closure (Range download, multi-library, admin scan, admin organize, OpenAPI, observability, real Mac IPC) | Merged | v0.5.0 |
 | Follow-ups | BullMQ collapse, downloads_total{state=failed}, SSE heartbeat | Merged | v0.5.1 |
+| Docker Hub publish | Multi-arch `alejandria-nas-bockend` image on Docker Hub via `.github/workflows/docker-publish.yml` (issue #106) | Merged | — |
 
 ## Running `apps/web/` (PR-3C)
 
