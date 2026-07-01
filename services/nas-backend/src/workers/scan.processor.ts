@@ -9,7 +9,7 @@ import {
   MAX_OUTPUT_BYTES,
   SPAWN_TIMEOUT_MS,
   type SpawnSidecarImpl,
-} from '@alejandria/sidecar';
+} from '../sidecar';
 
 /**
  * JSON envelope every ``alejandria-sidecar`` invocation emits on
