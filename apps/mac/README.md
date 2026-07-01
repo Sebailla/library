@@ -113,9 +113,17 @@ your release goal.
 ```bash
 cd apps/mac
 npm install
+# The `prepackage` npm hook runs `npm --prefix ../web run build:standalone`
+# first, so `.next/standalone/` exists before electron-forge resolves the
+# `extraResources` mapping in `forge.config.ts`. Skipping it is harmless
+# in dev (Next.js's dev server is what `loadURL` reaches), but in
+# production it would produce a .app that opens to a blank window
+# because the standalone server entry wouldn't be bundled.
 npm run package
 # Produces out/make/Alejandría-darwin-*/Alejandría.app/Contents/MacOS/alejandria
 # Plus out/make/Alejandría-darwin-x64.zip
+# The standalone server ships inside
+# out/make/Alejandría-darwin-*/Alejandría.app/Contents/Resources/standalone/
 ```
 
 ### 2. Unsigned .dmg (dev/testing)
@@ -165,7 +173,7 @@ in Finder, Dock, and Launchpad.
 ┌──────────────────────────────┐
 │ apps/web  (Next.js, dev 3001)│  ← the renderer
 └──────────────┬───────────────┘
-               │ loadURL (dev) or app:// (prod)
+               │ loadURL (dev) or http://127.0.0.1:<port> (prod)
 ┌──────────────▼───────────────┐
 │ apps/mac  (Electron 33)      │  ← this package
 │  ┌─────────────────────────┐ │
@@ -177,6 +185,9 @@ in Finder, Dock, and Launchpad.
 │  │ ipc-handlers.ts         │ │  ipcMain.handle('aleja:*')
 │  └─────────────────────────┘ │
 │  ┌─────────────────────────┐ │
+│  │ standalone-server.ts    │ │  spawn Next.js standalone
+│  └────────┬────────────────┘ │  (prod only)
+│  ┌────────▼────────────────┐ │
 │  │ sidecar-manager.ts      │ │  lazy spawn, SIGTERM/SIGKILL
 │  └────────┬────────────────┘ │
 └───────────┼──────────────────┘
@@ -188,11 +199,19 @@ in Finder, Dock, and Launchpad.
    └──────────────────────┘   services/nas-backend)
 ```
 
+In production the renderer is the **Next.js standalone server**
+that ships inside the `.app` at
+`Contents/Resources/standalone/`. The main process spawns it
+as a child process (see `src/standalone-server.ts`), waits for
+the HTTP listener, and `loadURL`s its `http://127.0.0.1:<port>`
+URL. The dev path (`loadURL('http://localhost:3001')`) is
+unchanged.
+
 ## Scripts
 
 | Command            | What it does                                                |
 |--------------------|-------------------------------------------------------------|
-| `npm test`         | Run the vitest unit + integration suite (64 tests across 12 files). |
+| `npm test`         | Run the vitest unit + integration suite (86 tests across 16 files). |
 | `npm run typecheck`| `tsc --noEmit` against the full tsconfig.                   |
 | `npm run build`    | Compile `src/*.ts` into `dist/*.js` (electron-forge input). |
 | `npm run dev`      | Boot Electron in dev mode (loads `http://localhost:3001`).  |

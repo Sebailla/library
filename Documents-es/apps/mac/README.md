@@ -116,7 +116,7 @@ nuevas.
 ┌──────────────────────────────┐
 │ apps/web  (Next.js, dev 3001)│  ← el renderer
 └──────────────┬───────────────┘
-               │ loadURL (dev) o app:// (prod)
+               │ loadURL (dev) o http://127.0.0.1:<port> (prod)
 ┌──────────────▼───────────────┐
 │ apps/mac  (Electron 33)      │  ← este paquete
 │  ┌─────────────────────────┐ │
@@ -128,6 +128,9 @@ nuevas.
 │  │ ipc-handlers.ts         │ │  ipcMain.handle('aleja:*')
 │  └─────────────────────────┘ │
 │  ┌─────────────────────────┐ │
+│  │ standalone-server.ts    │ │  spawn del Next.js standalone
+│  └────────┬────────────────┘ │  (solo en prod)
+│  ┌────────▼────────────────┐ │
 │  │ sidecar-manager.ts      │ │  spawn diferido, SIGTERM/SIGKILL
 │  └────────┬────────────────┘ │
 └───────────┼──────────────────┘
@@ -139,11 +142,19 @@ nuevas.
    └──────────────────────┘   services/nas-backend)
 ```
 
+En producción el renderer es el **Next.js standalone server**
+que se distribuye dentro del `.app` en
+`Contents/Resources/standalone/`. El proceso main lo arranca
+como child process (ver `src/standalone-server.ts`), espera a
+que el listener HTTP esté disponible, y hace `loadURL` contra
+`http://127.0.0.1:<port>`. El camino de dev
+(`loadURL('http://localhost:3001')`) no cambia.
+
 ## Scripts
 
 | Comando            | Qué hace                                                     |
 |--------------------|--------------------------------------------------------------|
-| `npm test`         | Ejecuta la suite unitaria + de integración de vitest (64 tests en 12 archivos). |
+| `npm test`         | Ejecuta la suite unitaria + de integración de vitest (86 tests en 16 archivos). |
 | `npm run typecheck`| `tsc --noEmit` contra el tsconfig completo.                  |
 | `npm run build`    | Compila `src/*.ts` a `dist/*.js` (input para electron-forge).|
 | `npm run dev`      | Arranca Electron en modo dev (carga `http://localhost:3001`).|
