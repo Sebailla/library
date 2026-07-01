@@ -1,6 +1,6 @@
 /**
  * Main process entry point for `@alejandria/mac` (PR-4C, issue #75;
- * PR-N8, issue #94).
+ * PR-N8, issue #94; PR-fix-mac-window-standalone-bundle).
  *
  * Wires the four layers of the Electron shell:
  *
@@ -8,7 +8,7 @@
  *      `window-all-closed`.
  *   2. The `BrowserWindow` — contextIsolation, sandbox, no node
  *      integration, loads the Next.js dev URL in development and
- *      the packaged `app://./prod` URL in production.
+ *      the **Next.js standalone server** URL in production.
  *   3. The preload script (`./preload.ts`) — exposes
  *      `window.alejandria` via contextBridge.
  *   4. The IPC handlers (`./ipc-handlers.ts`) — four channels:
@@ -32,9 +32,16 @@
  * Dev / prod URL convention:
  *   - Dev:   `http://localhost:3001` (matches the Next.js dev
  *            server started by `npm --prefix apps/web run dev`).
- *   - Prod:  `file://…/out/prod/index.html` (electron-forge
- *            `app://./` URL scheme registered in
- *            `forge.config.ts`).
+ *   - Prod:  `http://127.0.0.1:<port>` where `<port>` is the
+ *            free port the standalone server bound to (see
+ *            `./standalone-server.ts`).
+ *
+ * Why the change? PR-fix-mac-window-standalone-bundle replaces
+ * the previous `app://./index.html` load (which silently failed
+ * because no HTML file was bundled) with a real HTTP server
+ * running inside the .app. The standalone server is built by
+ * the `prepackage` npm hook (see `package.json`) and bundled via
+ * `extraResources` in `forge.config.ts`.
  */
 
 import { app, BrowserWindow, shell } from 'electron'
@@ -45,6 +52,16 @@ import { SidecarManager } from './sidecar-manager'
 import { createNasDownloader, type NasDownloader } from './downloader'
 import { createIcloudSyncer } from './syncer'
 import { createUpdater } from './updater'
+import {
+  getFreePort,
+  getRendererUrl,
+  packagedStandaloneDir,
+  resolveStandaloneEntry,
+  startStandaloneServer,
+  stopStandaloneServer,
+  waitForRenderer,
+  type ChildProcessLike,
+} from './standalone-server'
 import { join as pathJoin } from 'node:path'
 import { mkdir } from 'node:fs/promises'
 
@@ -87,12 +104,21 @@ function createIpcDownloader(nas: NasDownloader): {
 /** Address the renderer should load. In dev, the Next.js dev server. */
 const DEV_RENDERER_URL = 'http://localhost:3001'
 
-/** Filename of the Next.js static export consumed in production. */
-const PROD_RENDERER_FILE = 'index.html'
+/**
+ * The URL the production renderer should load. Populated by
+ * `bootstrap()` AFTER the standalone server is reachable. The
+ * indirection through a getter is what lets the same
+ * `createMainWindow()` code path serve dev and prod.
+ */
+let prodRendererUrl: string | null = null
 
 /**
  * Decide the URL the `BrowserWindow` should load. Centralised
  * here so dev / prod share the same webPreferences code path.
+ *
+ * In production we read the URL the bootstrap step set (it
+ * points at the standalone server's `http://127.0.0.1:<port>`).
+ * In dev we fall back to the Next.js dev server URL.
  */
 function rendererUrl(): string {
   // `ELECTRON_RENDERER_URL` is set by `electron-forge start` in
@@ -102,9 +128,12 @@ function rendererUrl(): string {
   if (!app.isPackaged) {
     return process.env['ELECTRON_RENDERER_URL'] ?? DEV_RENDERER_URL
   }
-  // In production the renderer is loaded via the `app://`
-  // protocol registered in `forge.config.ts`.
-  return `app://./${PROD_RENDERER_FILE}`
+  // Production — bootstrap() must have spawned the standalone
+  // server and stored its URL here. If somehow we get here before
+  // the server is ready we fall back to the dev URL so the user
+  // sees a meaningful error (404 page) instead of `app://` failing
+  // silently.
+  return prodRendererUrl ?? DEV_RENDERER_URL
 }
 
 /**
@@ -174,17 +203,43 @@ let sidecar: SidecarManager | null = null
 let syncerRef: { close: () => Promise<void> } | null = null
 
 /**
+ * The Next.js standalone server child process (production only).
+ * Spawned in `bootstrap()` and torn down in `before-quit` so the
+ * dev/prod split stays in one place.
+ */
+let standaloneServer: ChildProcessLike | null = null
+
+/**
  * Bootstrap the shell. The function is intentionally small so
  * its lifecycle is easy to read top-to-bottom:
  *
  *   1. wait for `app.whenReady`
- *   2. create the window
- *   3. create the sidecar, downloader, syncer, updater
- *   4. register the IPC handlers
- *   5. subscribe to teardown signals
+ *   2. (prod) spawn the Next.js standalone server and wait for
+ *      it to be reachable
+ *   3. create the window
+ *   4. create the sidecar, downloader, syncer, updater
+ *   5. register the IPC handlers
+ *   6. subscribe to teardown signals
  */
 async function bootstrap(): Promise<void> {
   await app.whenReady()
+
+  // In production, spin up the bundled Next.js standalone server
+  // before opening the window so `loadURL` resolves immediately.
+  // We pick a free port, spawn the server, then wait until the
+  // port answers before letting `createMainWindow` go ahead.
+  if (app.isPackaged) {
+    const port = await getFreePort()
+    const standaloneDir = packagedStandaloneDir(process.resourcesPath)
+    const entryPath = resolveStandaloneEntry({ standaloneDir })
+    standaloneServer = startStandaloneServer({
+      entryPath,
+      host: '127.0.0.1',
+      port,
+    })
+    await waitForRenderer({ host: '127.0.0.1', port })
+    prodRendererUrl = getRendererUrl({ host: '127.0.0.1', port })
+  }
 
   sidecar = new SidecarManager({
     command: 'python',
@@ -233,16 +288,18 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', (event) => {
   // If we've already torn down, let the default quit proceed.
-  if (sidecar === null && syncerRef === null) return
-  // Otherwise, intercept the quit, kill the sidecar cleanly,
-  // close the chokidar handle, and let the process exit. The
-  // sidecar's SIGTERM→SIGKILL escalation guarantees we don't
-  // block shutdown forever.
+  if (sidecar === null && syncerRef === null && standaloneServer === null) return
+  // Otherwise, intercept the quit, kill the sidecar + standalone
+  // server cleanly, close the chokidar handle, and let the
+  // process exit. The sidecar's SIGTERM→SIGKILL escalation
+  // guarantees we don't block shutdown forever.
   event.preventDefault()
   const sidecarRef = sidecar
   const syncerSave = syncerRef
+  const standaloneRef = standaloneServer
   sidecar = null
   syncerRef = null
+  standaloneServer = null
   unregisterIpcHandlers()
   void syncerSave
     ?.close()
@@ -256,6 +313,17 @@ app.on('before-quit', (event) => {
       } catch (err: unknown) {
         // eslint-disable-next-line no-console
         console.error('[mac] failed to kill sidecar during quit', err)
+      }
+      // The standalone server is bound to a port we picked at
+      // bootstrap time; SIGTERM lets Next.js close the listener
+      // cleanly so the OS reclaims the port.
+      if (standaloneRef !== null) {
+        try {
+          await stopStandaloneServer(standaloneRef)
+        } catch (err: unknown) {
+          // eslint-disable-next-line no-console
+          console.error('[mac] failed to stop standalone server during quit', err)
+        }
       }
       app.exit(0)
     })
