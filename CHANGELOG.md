@@ -281,6 +281,36 @@ The block was reviewed via 4R fan-out (R1 Risk + R2 Readability + R3 Reliability
 
 ---
 
+## [0.5.2] — 2026-07-01 — Dockerfile build fix + Docker Hub publish
+
+Patch release of `alejandria-v2`. Closes the loop on the Docker Hub image publish workflow. The previous release (v0.5.1) was tagged, but the Docker build on the tag failed because the sidecar workspace dep rendered a broken `package-lock.json` and several runtime deps were missing from `package.json`. v0.5.2 ships the fix.
+
+### Fixed
+
+- **Docker build `npm ci` failure** (#110): the `@alejandria/sidecar` `file:../../packages/sidecar` dep in a loose monorepo (no root `workspaces` field) produced a half-resolved `package-lock.json` missing `version` / `resolved` fields for the workspace package. Fix: inline the sidecar source into `services/nas-backend/src/sidecar/` (it was only consumed by one file: `scan.processor.ts`), regenerate `package-lock.json` clean (777 packages, all with `version`+`resolved`), and revert the Dockerfile to a single build context. The multi-stage `build-sidecar` approach is no longer needed.
+- **Docker build missing deps**: `@nestjs/jwt`, `@nestjs/passport`, `passport`, `passport-jwt` were already imported in source but never declared in `package.json`. Added in v0.5.2.
+- **Docker Hub workflow action versions** (#108, #109): bumped to `actions/checkout@v5`, `docker/setup-qemu-action@v4`, `docker/setup-buildx-action@v4`, `docker/login-action@v3`, `docker/build-push-action@v6`. The previous attempt to use `v5` for the setup actions errored because no such releases are published (latest is v4.1.0).
+- **Dockerfile `main` field fix for the inlined sidecar**: `packages/sidecar/package.json` had `main: "src/index.ts"` (which doesn't exist in published packages); now `dist/index.js` (the dist was already there).
+
+### Added
+
+- **Docker Hub publish workflow** (#107, final): every `v*` tag now produces a multi-arch image at `docker.io/sebailla001/alejandria-nas-bockend:vX.Y.Z` automatically. `v0.5.1` is the first release that would have shipped via the workflow if the `npm ci` fix had been in place.
+- **QNAP install guide** (`Documents-es/QNAP_INSTALL.md`, ~1100 lines) — complete end-to-end setup on a QNAP with Container Station, including backups, Tailscale access, pg_cron defrag, monitoring.
+
+### Stats
+
+- 1 chained PR merged (the closure of #110 plus the actions-version fixes)
+- ~+1,200 / -100 LOC (counting inlined sidecar + Dockerfile tweaks)
+- 135 tests passing (no regressions from v0.5.1)
+
+### Pull requests
+
+- PR #107: `feat(nas-backend): publish to Docker Hub via GitHub Actions`
+- PR #108: `fix(ci): correct Docker Actions to v4 (no v5 exists for setup actions)`
+- PR #110: `fix(ci+dockerfile): inline sidecar to fix Dockerfile npm ci failure`
+
+---
+
 ## [0.5.1] — 2026-06-30 — NAS backend follow-up fixes
 
 Patch release of `alejandria-v2`. Three follow-up fixes that the 4R + judgment-day review identified as real issues but not release blockers for v0.5.0.

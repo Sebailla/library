@@ -72,3 +72,32 @@ Segunda release del refactor `alejandria-v2`. Agrega el backend NestJS completo 
 - El `me` endpoint no incluía el `device_name`; ahora se proyecta desde la join con `devices`
 - El health endpoint duplicaba la conexión Postgres (memory leak bajo carga); ahora comparte el pool
 - El `bonjour` advertise corría en modo blocking y colgaba el event loop; ahora se inicializa async con timeout
+---
+
+## [0.5.2] — 2026-07-01 — Fix de build Dockerfile + publicación a Docker Hub
+
+Patch release de `alejandria-v2`. Cierra el loop del workflow de publicación de imagen a Docker Hub. La release anterior (v0.5.1) se taggeó, pero el build de Docker en el tag falló porque la dep workspace del sidecar producía un `package-lock.json` roto y varias deps runtime faltaban en `package.json`. v0.5.2 trae el fix.
+
+### Fixed
+
+- **`npm ci` failure en Docker build** (#110): la dep `@alejandria/sidecar` vía `file:../../packages/sidecar` en un monorepo "loose" (sin `workspaces` field en la raíz) producía un `package-lock.json` medio resuelto al que le faltaban los campos `version` / `resolved` para el package workspace. Fix: inline del source del sidecar en `services/nas-backend/src/sidecar/` (solo lo consumía un archivo: `scan.processor.ts`), regeneración de `package-lock.json` limpio (777 packages, todos con `version`+`resolved`), y reversión del Dockerfile a un solo contexto de build. El approach multi-stage `build-sidecar` ya no es necesario.
+- **Deps faltantes en el build de Docker**: `@nestjs/jwt`, `@nestjs/passport`, `passport`, `passport-jwt` ya estaban como imports en el source pero nunca declaradas en `package.json`. Agregadas en v0.5.2.
+- **Versiones de actions de Docker Hub workflow** (#108, #109): bumpeadas a `actions/checkout@v5`, `docker/setup-qemu-action@v4`, `docker/setup-buildx-action@v4`, `docker/login-action@v3`, `docker/build-push-action@v6`. El intento previo de usar `v5` para las setup actions falló porque esas versiones no están publicadas (la última es v4.1.0).
+- **Fix del field `main` del Dockerfile para el sidecar inlined**: `packages/sidecar/package.json` tenía `main: "src/index.ts"` (que no existe en packages publicados); ahora `dist/index.js` (el dist ya estaba).
+
+### Added
+
+- **Workflow de publicación a Docker Hub** (#107, final): cada tag `v*` ahora produce una imagen multi-arch en `docker.io/sebailla001/alejandria-nas-bockend:vX.Y.Z` automáticamente. `v0.5.1` es la primera release que se habría publicado por el workflow si el fix de `npm ci` hubiera estado.
+- **Guía de instalación en QNAP** (`Documents-es/QNAP_INSTALL.md`, ~1100 líneas) — setup end-to-end completo en un QNAP con Container Station, incluyendo backups, acceso Tailscale, defrag pg_cron, monitoreo.
+
+### Stats
+
+- 1 chained PR mergeado (el cierre de #110 más los fixes de versiones de actions)
+- ~+1,200 / -100 LOC (contando sidecar inlined + ajustes del Dockerfile)
+- 135 tests pasando (sin regresiones desde v0.5.1)
+
+### Pull requests
+
+- PR #107: `feat(nas-backend): publish to Docker Hub via GitHub Actions`
+- PR #108: `fix(ci): correct Docker Actions to v4 (no v5 exists for setup actions)`
+- PR #110: `fix(ci+dockerfile): inline sidecar to fix Dockerfile npm ci failure`
