@@ -36,20 +36,24 @@ type ChildLike = {
   on: (event: 'error', cb: (err: Error) => void) => unknown
 }
 
-function fakeChild(): ChildLike {
+function fakeChild(): ChildLike & {
+  _fireExit: (code: number | null) => void
+} {
   const handlers: { exit?: (code: number | null) => void; error?: (err: Error) => void } = {}
-  return {
+  const child = {
     pid: 12345,
     kill: vi.fn(),
-    once: (event, cb) => {
-      if (event === 'exit') handlers.exit = cb as (code: number | null) => void
+    once: (event: 'exit', cb: (code: number | null) => void) => {
+      if (event === 'exit') handlers.exit = cb
       return undefined
     },
-    on: (event, cb) => {
-      if (event === 'error') handlers.error = cb as (err: Error) => void
+    on: (event: 'error', cb: (err: Error) => void) => {
+      if (event === 'error') handlers.error = cb
       return undefined
     },
+    _fireExit: (code: number | null) => handlers.exit?.(code),
   }
+  return child
 }
 
 describe('standalone-server (PR-fix-mac-window-standalone-bundle)', () => {
@@ -113,7 +117,7 @@ describe('standalone-server (PR-fix-mac-window-standalone-bundle)', () => {
     const child = fakeChild()
     const promise = stopStandaloneServer(child as never)
     // Manually fire the exit event to simulate the child exiting.
-    ;(child as unknown as { _handlers: { exit?: (code: number | null) => void } })._handlers?.exit?.(0)
+    child._fireExit(0)
     await expect(promise).resolves.toBeUndefined()
     expect(child.kill).toHaveBeenCalledWith('SIGTERM')
   })
@@ -145,10 +149,13 @@ describe('standalone-server (PR-fix-mac-window-standalone-bundle)', () => {
       spawn,
     })
 
-    const opts = (spawn as unknown as { mock: { calls: unknown[][] } }).mock.calls[0][2] as {
-      env: Record<string, string>
-    }
-    expect(opts.env.ALEJANDRIA_NAS_URL).toBe('http://nas.local:8000')
+    const opts = (
+      (spawn as unknown as { mock: { calls: unknown[][] } }).mock.calls[0]?.[2] as
+        | { env: Record<string, string> }
+        | undefined
+    )
+    expect(opts).toBeDefined()
+    expect(opts?.env.ALEJANDRIA_NAS_URL).toBe('http://nas.local:8000')
     // Make sure the standalone entry actually exists for the spawn call
     expect(existsSync(serverEntry)).toBe(true)
   })
