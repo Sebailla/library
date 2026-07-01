@@ -27,9 +27,10 @@ The image:
   personal project).
 - Pushes `latest` **only** on main-branch builds. Release tags stay
   immutable per-version so we never silently overwrite an old release.
-- Uses `actions/checkout@v5`, `docker/setup-qemu-action@v5`,
-  `docker/setup-buildx-action@v5`, `docker/build-push-action@v6` to
-  avoid the Node 20 deprecation warning on the GitHub Actions runner.
+- Uses `actions/checkout@v5`, `docker/setup-qemu-action@v4`,
+  `docker/setup-buildx-action@v4`, `docker/login-action@v3`,
+  `docker/build-push-action@v6` to avoid the Node 20 deprecation
+  warning on the GitHub Actions runner.
 
 ---
 
@@ -171,7 +172,8 @@ For the full QNAP + Container Station walkthrough see
 | `latest` didn't update | The build wasn't on `main` (release tags never set `latest`) | Push the tag from `main`, or trigger a `workflow_dispatch` from `main` manually. |
 | `pull access denied for sebailla001/alejandria-nas-bockend` locally | Typo in the image name (`bockend` vs `backend`) | The image name is intentionally `nas-bockend` (typo on the registry side) — match it exactly. |
 | ARM64 host can't pull the image | The published tag predates the multi-arch migration | Re-pull — current tags ship `linux/amd64` and `linux/arm64`. |
-| Warning `Node.js 20 is deprecated` in workflow logs | The runner's default toolchain is Node 20; the deprecation warning is informational only | Bump the `actions/checkout`, `docker/setup-qemu-action`, `docker/setup-buildx-action`, and `docker/build-push-action` to `v5`/`v6` (done in the current workflow). The image build still uses `node:20-bookworm-slim` inside Docker — that Node 20 base image is still supported for the foreseeable future. |
+| Warning `Node.js 20 is deprecated` in workflow logs | The runner's default toolchain is Node 20; the deprecation warning is informational only | Bump the `actions/checkout` to `v5` and `docker/build-push-action` to `v6` (the docker setup actions are already on `v4` which is the latest available — there is no `v5`). The image build still uses `node:20-bookworm-slim` inside Docker — that Node 20 base image is still supported for the foreseeable future. |
+| `Unable to resolve action docker/setup-buildx-action@v5, unable to find version v5` (or `setup-qemu-action@v5`) | A previous commit bumped those actions to `v5` but only `v3`/`v4` are published | Use `docker/setup-qemu-action@v4` and `docker/setup-buildx-action@v4` (latest published). |
 
 ---
 
