@@ -5,16 +5,16 @@
 # Stage 3 (runtime): copy dist + production node_modules, run as non-root.
 #
 # Build-time arguments (consumed by docker-publish.yml):
-#   * VERSION   — semver from package.json (e.g. 0.5.1)
-#   * VCS_REF   — full git SHA of the commit being built
+#   * VERSION    — semver from package.json (e.g. 0.5.1)
+#   * VCS_REF    — full git SHA of the commit being built
 #   * BUILD_DATE — RFC 3339 timestamp of the build (set by CI to ISO format)
 
 # ---------- Stage 1: build ----------
-FROM node:20-bookworm-slim AS build
+FROM node:20.11-bookworm-slim AS build
 WORKDIR /app
 
 # Install all deps (dev included) so we can compile.
-COPY package.json package-lock.json ./
+COPY package.json package-lock.json* ./
 RUN npm ci --no-audit --no-fund
 
 # Compile TypeScript via the nest CLI.
@@ -23,13 +23,13 @@ COPY src ./src
 RUN npm run build
 
 # ---------- Stage 2: production deps ----------
-FROM node:20-bookworm-slim AS deps
+FROM node:20.11-bookworm-slim AS deps
 WORKDIR /app
-COPY package.json package-lock.json ./
+COPY package.json package-lock.json* ./
 RUN npm ci --omit=dev --no-audit --no-fund
 
 # ---------- Stage 3: runtime ----------
-FROM node:20-bookworm-slim AS runtime
+FROM node:20.11-bookworm-slim AS runtime
 
 # Build-time args (consumed in this stage only — defaults make local
 # `docker build .` work without --build-arg).
