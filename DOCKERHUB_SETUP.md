@@ -18,7 +18,7 @@ the published image in production.
 
 The image:
 
-- Is built from `services/nas-backend/Dockerfile` (multi-stage, node 20, non-root).
+- Is built from `services/nas-backend/Dockerfile` (multi-stage, node 20-bookworm-slim, non-root).
 - Carries OCI image annotations (title, source, version, revision,
   created date) so `docker inspect` and Docker Hub show provenance.
 - Exposes a `HEALTHCHECK` against the existing `/livez` endpoint, so
@@ -27,6 +27,9 @@ The image:
   personal project).
 - Pushes `latest` **only** on main-branch builds. Release tags stay
   immutable per-version so we never silently overwrite an old release.
+- Uses `actions/checkout@v5`, `docker/setup-qemu-action@v5`,
+  `docker/setup-buildx-action@v5`, `docker/build-push-action@v6` to
+  avoid the Node 20 deprecation warning on the GitHub Actions runner.
 
 ---
 
@@ -162,11 +165,13 @@ For the full QNAP + Container Station walkthrough see
 
 | Symptom | Cause | Fix |
 |---------|-------|-----|
-| Workflow fails with `unauthorized: access denied` | Missing or wrong `DOCKERHUB_USERNAME` / `DOCKERHUB_TOKEN` | Re-create the access token in Docker Hub and update both secrets in **Settings → Secrets and variables → Actions**. |
+| `Error response from daemon: Get "https://registry-1.docker.io/v2/": unknown: malformed HTTP Authorization header` (the `log in to Docker Hub` step fails) | One of three things: (1) `DOCKERHUB_USERNAME` is empty or wrong (must be the **username**, not the email); (2) `DOCKERHUB_TOKEN` is empty or revoked — the access token from §2.1 must be pasted in **without** quotes or trailing whitespace; (3) you used the account password instead of a personal access token (Docker Hub blocks plain passwords for registry API auth on most accounts). | Open **Settings → Secrets and variables → Actions** and inspect both values. Re-issue a fresh access token in Docker Hub and overwrite `DOCKERHUB_TOKEN` (use the `gh secret set` CLI or the web UI — never paste it in chat or commits). |
+| Workflow fails with `unauthorized: access denied` or `requested access to the resource is denied` | The token does not have **Read & Write** scope, or the user does not own the target repository (`sebailla001/alejandria-nas-bockend`) | In Docker Hub, regenerate the access token with the right scope. If the user truly doesn't own the repo, change `DOCKERHUB_USERNAME` and the image name in `.github/workflows/docker-publish.yml` (lines 5 and 8) to whatever account does. |
 | Workflow fails with `tag already exists` | Two pushes racing on the same `v*` tag | Tags are immutable on Docker Hub — bump to the next version, never re-push an existing tag. |
 | `latest` didn't update | The build wasn't on `main` (release tags never set `latest`) | Push the tag from `main`, or trigger a `workflow_dispatch` from `main` manually. |
 | `pull access denied for sebailla001/alejandria-nas-bockend` locally | Typo in the image name (`bockend` vs `backend`) | The image name is intentionally `nas-bockend` (typo on the registry side) — match it exactly. |
 | ARM64 host can't pull the image | The published tag predates the multi-arch migration | Re-pull — current tags ship `linux/amd64` and `linux/arm64`. |
+| Warning `Node.js 20 is deprecated` in workflow logs | The runner's default toolchain is Node 20; the deprecation warning is informational only | Bump the `actions/checkout`, `docker/setup-qemu-action`, `docker/setup-buildx-action`, and `docker/build-push-action` to `v5`/`v6` (done in the current workflow). The image build still uses `node:20-bookworm-slim` inside Docker — that Node 20 base image is still supported for the foreseeable future. |
 
 ---
 

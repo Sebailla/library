@@ -168,11 +168,13 @@ Para el walkthrough completo de QNAP + Container Station ver
 
 | Síntoma | Causa | Fix |
 |---------|-------|-----|
-| El workflow falla con `unauthorized: access denied` | Falta o está mal `DOCKERHUB_USERNAME` / `DOCKERHUB_TOKEN` | Re-creá el access token en Docker Hub y actualizá los dos secretos en **Settings → Secrets and variables → Actions**. |
+| `Error response from daemon: Get "https://registry-1.docker.io/v2/": unknown: malformed HTTP Authorization header` (falla el step `log in to Docker Hub`) | Una de tres: (1) `DOCKERHUB_USERNAME` está vacío o mal (tiene que ser el **username**, no el email); (2) `DOCKERHUB_TOKEN` está vacío o revocado — el access token de §2.1 tiene que estar pegado **sin** comillas ni espacios; (3) usaste la password de la cuenta en lugar de un personal access token (Docker Hub bloquea passwords planas en la API de registry en la mayoría de las cuentas). | Abrí **Settings → Secrets and variables → Actions** e inspeccioná ambos valores. Re-emití un access token fresco en Docker Hub y sobrescribí `DOCKERHUB_TOKEN` (usá `gh secret set` desde la CLI o la UI web — nunca lo pegues en chat ni commits). |
+| El workflow falla con `unauthorized: access denied` o `requested access to the resource is denied` | El token no tiene scope **Read & Write**, o el usuario no es dueño del repo destino (`sebailla001/alejandria-nas-bockend`) | En Docker Hub, regenerá el access token con el scope correcto. Si el usuario realmente no es dueño del repo, cambiá `DOCKERHUB_USERNAME` y el nombre de la imagen en `.github/workflows/docker-publish.yml` (líneas 5 y 8) a la cuenta que sí lo sea. |
 | El workflow falla con `tag already exists` | Dos pushes corriendo contra el mismo tag `v*` | Los tags son inmutables en Docker Hub — bump a la próxima versión, nunca repushees un tag existente. |
 | `latest` no se actualizó | El build no era desde `main` (los tags de release nunca setean `latest`) | Pusheá el tag desde `main`, o dispará un `workflow_dispatch` desde `main`. |
 | `pull access denied for sebailla001/alejandria-nas-bockend` local | Typo en el nombre (`bockend` vs `backend`) | El nombre es intencionalmente `nas-bockend` (typo del lado del registry) — matchealo exactamente. |
 | El host ARM64 no puede pull-ear la imagen | El tag publicado es anterior a la migración multi-arch | Re-pull — los tags actuales traen `linux/amd64` y `linux/arm64`. |
+| Warning `Node.js 20 is deprecated` en los logs del workflow | La toolchain default del runner es Node 20; la deprecation es solo informativa | Bumpeá `actions/checkout`, `docker/setup-qemu-action`, `docker/setup-buildx-action` y `docker/build-push-action` a `v5`/`v6` (ya hecho en el workflow actual). La build de la imagen sigue usando `node:20-bookworm-slim` dentro de Docker — esa imagen base Node 20 sigue soportada por un buen tiempo. |
 
 ---
 
