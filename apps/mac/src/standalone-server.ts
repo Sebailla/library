@@ -30,7 +30,7 @@
 
 import { createServer } from 'node:net'
 import { createConnection } from 'node:net'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { existsSync, readdirSync, statSync } from 'node:fs'
 import { spawn as defaultSpawn, type ChildProcess } from 'node:child_process'
 
@@ -68,7 +68,7 @@ export type ChildProcessLike = ChildProcess | ReturnType<typeof defaultSpawn>
 export type SpawnFn = (
   command: string,
   args: readonly string[],
-  options: { env: NodeJS.ProcessEnv },
+  options: { env: NodeJS.ProcessEnv; cwd?: string },
 ) => ChildProcessLike
 
 /**
@@ -185,9 +185,18 @@ export function startStandaloneServer(params: {
     PORT: String(params.port),
     HOSTNAME: host,
     NODE_ENV: process.env['NODE_ENV'] ?? 'production',
+    // Tell Electron's binary to act as plain Node.js for this child
+    // process. Without this, `process.execPath` (which is the Electron
+    // binary in the main process) tries to open `entryPath` as an
+    // Electron app instead of running it as a Node.js script.
+    ELECTRON_RUN_AS_NODE: '1',
     ...(params.env ?? {}),
   }
-  return spawn(process.execPath, [params.entryPath], { env })
+  // cwd must be the server.js directory so Next.js can resolve its
+  // package.json, .next/ config, and traced node_modules relative to
+  // the standalone output tree.
+  const cwd = dirname(params.entryPath)
+  return spawn(process.execPath, [params.entryPath], { env, cwd })
 }
 
 /**

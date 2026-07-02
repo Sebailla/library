@@ -1,3 +1,4 @@
+import path from 'path'
 import type { NextConfig } from 'next'
 
 /**
@@ -11,12 +12,18 @@ import type { NextConfig } from 'next'
  *   process (see `apps/mac/src/standalone-server.ts`). Without this
  *   the Mac package step would only ship a webpack chunked build,
  *   which Electron cannot `loadURL`.
+ * - `outputFileTracingRoot` pins the file tracer to the monorepo root so the
+ *   standalone bundle doesn't trace all the way up to the user's home
+ *   directory (which creates a recursive tree and hangs electron-forge's
+ *   packager). Must be an absolute path — relative paths confuse the
+ *   nft tracer in monorepo contexts.
  * - React Strict Mode surfaces unsafe effects early in dev.
  */
 const nextConfig: NextConfig = {
   cacheComponents: true,
   output: 'standalone',
   reactStrictMode: true,
+  outputFileTracingRoot: path.join(__dirname, '../../'),
 }
 
 export default nextConfig

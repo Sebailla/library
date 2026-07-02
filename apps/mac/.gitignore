@@ -2,6 +2,7 @@
 node_modules/
 
 # build artefacts
+standalone/
 dist/
 out/
 build/

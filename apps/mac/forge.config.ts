@@ -56,16 +56,16 @@ const config: ForgeConfig = {
       },
     ],
     // Bundle the Next.js standalone server inside the .app so the
-    // main process can spawn it as a child process. The source path
-    // is relative to the `apps/mac/` working dir at package time —
-    // `prepackage` (in package.json) runs `next build` first so
-    // `.next/standalone/` exists when electron-forge resolves this.
-    extraResources: [
-      {
-        from: '../web/.next/standalone',
-        to: 'standalone',
-      },
-    ],
+    // main process can spawn it as a child process. The prepackage
+    // hook (in package.json) copies the standalone output from
+    // ../web/.next/standalone into standalone/ so the packager
+    // can find it with a relative path.
+    // Note: @electron/packager v18 uses `extraResource` (singular,
+    // string | string[]) for plain directory copies, NOT the
+    // `extraResources` (plural, {from,to}[]) syntax that some docs
+    // reference. The destination is `Resources/<basename(path)>`,
+    // so `standalone/` ends up at `Resources/standalone/`.
+    extraResource: ['standalone'],
   },
   rebuildConfig: {},
   makers: [
