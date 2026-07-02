@@ -137,18 +137,42 @@ function rendererUrl(): string {
 }
 
 /**
- * Create the single top-level `BrowserWindow`. The window holds
- * the Next.js renderer, the preload script, and nothing else —
- * everything privileged runs in the main process.
+ * Detect whether the host macOS version supports `vibrancy: 'sidebar'`
+ * on a frameless `BrowserWindow` (PR-A, REQ-MVF-005).
+ *
+ * macOS Sonoma (14) ships reliable `vibrancy` rendering; Big Sur (11)
+ * and Monterey (12) accept the option but the visual degrades, and on
+ * older builds Electron has been observed to skip the effect entirely.
+ * We require macOS 14+ for vibrancy and fall back to a flat background
+ * color on everything older. The OS version comes from
+ * `process.getSystemVersion()` which Electron exposes on `darwin`.
  */
-function createMainWindow(): BrowserWindow {
-  const win = new BrowserWindow({
+function supportsVibrancy(): boolean {
+  if (process.platform !== 'darwin') return false
+  const ver = process.getSystemVersion?.() ?? '0.0'
+  const major = parseInt(ver.split('.')[0] ?? '0', 10)
+  return Number.isFinite(major) && major >= 14
+}
+
+/**
+ * Build the `BrowserWindow` options object. Vibrancy + backgroundMaterial
+ * are only added when the host supports them — Electron refuses to set
+ * them after construction, so the option has to be present (or absent)
+ * at creation time. We never mutate after construction.
+ */
+function buildWindowOptions(): Electron.BrowserWindowConstructorOptions {
+  const base: Electron.BrowserWindowConstructorOptions = {
     width: 1280,
     height: 800,
     minWidth: 900,
     minHeight: 600,
     show: false,
     title: 'Alejandría',
+    // PR-A: hiddenInset titlebar + custom traffic-light position so the
+    // app can paint a custom topbar (PR-B's `.drag-region`) under the
+    // native controls.
+    titleBarStyle: 'hiddenInset',
+    trafficLightPosition: { x: 12, y: 14 },
     webPreferences: {
       // Security: the renderer is a Next.js app that has no
       // business touching Node. The preload script is the only
@@ -160,7 +184,26 @@ function createMainWindow(): BrowserWindow {
       // (see `forge.config.ts`).
       preload: join(__dirname, 'preload.js'),
     },
-  })
+  }
+  if (supportsVibrancy()) {
+    // Sonoma+: native translucent sidebar look.
+    base.vibrancy = 'sidebar'
+    base.backgroundMaterial = 'auto'
+  } else {
+    // Big Sur / Monterey / non-darwin: flat color keeps the chrome
+    // legible instead of showing the OS-default white flash on launch.
+    base.backgroundColor = '#141416'
+  }
+  return base
+}
+
+/**
+ * Create the single top-level `BrowserWindow`. The window holds
+ * the Next.js renderer, the preload script, and nothing else —
+ * everything privileged runs in the main process.
+ */
+function createMainWindow(): BrowserWindow {
+  const win = new BrowserWindow(buildWindowOptions())
 
   win.once('ready-to-show', () => {
     win.show()
@@ -329,4 +372,15 @@ app.on('before-quit', (event) => {
     })
 })
 
-void bootstrap()
+bootstrap().catch((err: unknown) => {
+  console.error('[mac] bootstrap failed — exiting', err)
+  // Show a native dialog so the user knows what happened instead
+  // of a blank / invisible app.
+  void import('electron').then(({ dialog }) => {
+    void dialog.showErrorBox(
+      'Alejandría could not start',
+      `A critical error occurred during startup:\n\n${String(err)}`,
+    )
+  })
+  app.exit(1)
+})
