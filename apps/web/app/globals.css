@@ -1,0 +1,87 @@
+/*
+ * Global stylesheet for `@alejandria/web` (PR-A, REQ-MVF-003 / REQ-MVF-004 / REQ-MVF-006).
+ *
+ *   - Tailwind v4 (configured entirely in CSS, no JS config file)
+ *   - Design tokens consumed by every later PR (mac-component-library,
+ *     mac-app-shell, mac-library-page, mac-reader-page, mac-browse-page,
+ *     mac-search-page) — do NOT rename tokens mid-PR chain (proposal risk #5).
+ *   - Theme is driven by `data-theme` on `<html>`. The inline script in
+ *     `apps/web/app/layout.tsx` writes that attribute before first paint
+ *     to prevent FOUC.
+ *
+ * Token palette is Apple-HIG-aligned: white surfaces, soft `#f5f5f7`
+ * panels, near-black text, `#0066cc` accent for active state / links.
+ */
+
+@import "tailwindcss";
+
+@theme {
+  /* Light surface palette. */
+  --color-bg:               #ffffff;
+  --color-surface:          #f5f5f7;
+  --color-surface-elevated: #ffffff;
+  --color-text:             #1d1d1f;
+  --color-text-muted:       #6e6e73;
+  --color-accent:           #0066cc;
+  --color-border:           #d2d2d7;
+
+  /* Spacing scale (4 / 8 / 12 / 16 / 24 / 32 / 48 / 64 px). */
+  --spacing-1:  0.25rem;   /*  4px */
+  --spacing-2:  0.5rem;    /*  8px */
+  --spacing-3:  0.75rem;   /* 12px */
+  --spacing-4:  1rem;      /* 16px */
+  --spacing-6:  1.5rem;    /* 24px */
+  --spacing-8:  2rem;      /* 32px */
+  --spacing-12: 3rem;      /* 48px */
+  --spacing-16: 4rem;      /* 64px */
+
+  /* Radius scale. */
+  --radius-sm:  6px;
+  --radius-md:  8px;
+  --radius-lg:  12px;
+  --radius-xl:  16px;
+  --radius-2xl: 24px;
+
+  /* Shadow scale (used by BookCard cover, hover states). */
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.06);
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.08);
+  --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.12);
+
+  /* Font stacks — system fonts only in v1, no @font-face (open decision #1). */
+  --font-sans:    -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+  --font-display: -apple-system, BlinkMacSystemFont, "SF Pro Display", system-ui, sans-serif;
+}
+
+/* Dark theme — toggled by the runtime script + useTheme hook. */
+html[data-theme="dark"] {
+  --color-bg:               #000000;
+  --color-surface:          #1c1c1e;
+  --color-surface-elevated: #2c2c2e;
+  --color-text:             #f5f5f7;
+  --color-text-muted:       #98989d;
+  --color-accent:           #0a84ff;
+  --color-border:           #38383a;
+}
+
+/* Reader-scoped themes (per REQ-MRP-004, consumed by Reader page in PR-C2).
+   Empty in PR-A — PR-C2 fills the token overrides. The selectors exist so
+   PR-A's runtime script can already apply `data-theme="reader-light"` etc. */
+html[data-theme="reader-light"] {}
+html[data-theme="reader-sepia"]  {}
+html[data-theme="reader-dark"]   {}
+
+/* Base layer — apply tokens to the document root. */
+@layer base {
+  html,
+  body {
+    background: var(--color-bg);
+    color: var(--color-text);
+    font-family: var(--font-sans);
+  }
+}
+
+/* Drag-region utilities — consumed by Topbar (PR-B) and the Electron titlebar.
+   `-webkit-app-region` is the Electron hook that lets a DOM element act as
+   the OS-level drag handle for a frameless window. */
+.drag-region { -webkit-app-region: drag; }
+.no-drag     { -webkit-app-region: no-drag; }
