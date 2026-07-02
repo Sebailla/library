@@ -12,6 +12,7 @@
     "dev": "electron-forge start",
     "build": "tsc -p tsconfig.build.json",
     "start": "electron-forge start",
+    "prepackage": "npm --prefix ../web run build:standalone && rsync -a --delete ../web/.next/standalone/ standalone/",
     "package": "electron-forge package",
     "make": "electron-forge make",
     "dist:mac:sign": "./scripts/sign-and-notarize.sh",

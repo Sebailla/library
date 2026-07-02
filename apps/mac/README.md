@@ -103,13 +103,77 @@ rm -rf ~/Library/Logs/alejandria
 
 The next launch will pick up new pairing credentials again.
 
+## Building a distributable
+
+The Mac app can be packaged in three ways. Pick the one that matches
+your release goal.
+
+### 1. Quick zip (no codesign, dev/testing)
+
+```bash
+cd apps/mac
+npm install
+# The `prepackage` npm hook runs `npm --prefix ../web run build:standalone`
+# first, so `.next/standalone/` exists before electron-forge resolves the
+# `extraResources` mapping in `forge.config.ts`. Skipping it is harmless
+# in dev (Next.js's dev server is what `loadURL` reaches), but in
+# production it would produce a .app that opens to a blank window
+# because the standalone server entry wouldn't be bundled.
+npm run package
+# Produces out/make/Alejandría-darwin-*/Alejandría.app/Contents/MacOS/alejandria
+# Plus out/make/Alejandría-darwin-x64.zip
+# The standalone server ships inside
+# out/make/Alejandría-darwin-*/Alejandría.app/Contents/Resources/standalone/
+```
+
+### 2. Unsigned .dmg (dev/testing)
+
+```bash
+cd apps/mac
+npm install
+npm run dist:mac:unsigned
+# Produces out/Alejandría-0.1.0.dmg (or version-appropriate)
+```
+
+### 3. Codesigned + notarized .dmg (production)
+
+```bash
+# Set credentials (see BUILD.md for full env vars)
+export MACOS_CODESIGN_IDENTITY="Developer ID Application: Sebailla (XXXXXXXXXX)"
+export APPLE_ID="sebailla@example.com"
+export APPLE_ID_PASSWORD="abcd-efgh-ijkl-mnop"
+export APPLE_TEAM_ID="XXXXXXXXXX"
+
+cd apps/mac
+npm run dist:mac:sign
+# Produces out/Alejandría-0.1.0.dmg, codesigned and notarized
+```
+
+### Installing the app
+
+After producing the .dmg:
+
+1. Open the .dmg (double-click in Finder)
+2. Drag `Alejandría.app` to `/Applications`
+3. Eject the .dmg
+4. Open the app from `/Applications` (or Launchpad)
+
+The custom icon (a stylised open book on warm parchment) will appear
+in Finder, Dock, and Launchpad.
+
+## Updating the app icon
+
+1. Edit `apps/mac/build-resources/icon.png` (any image editor, 1024x1024 min)
+2. Run `python3 apps/mac/scripts/generate-icon.py` to regenerate the .icns + iconset
+3. Re-run `npm run package` or `npm run dist:mac:unsigned`
+
 ## For contributors — architecture and scripts
 
 ```
 ┌──────────────────────────────┐
 │ apps/web  (Next.js, dev 3001)│  ← the renderer
 └──────────────┬───────────────┘
-               │ loadURL (dev) or app:// (prod)
+               │ loadURL (dev) or http://127.0.0.1:<port> (prod)
 ┌──────────────▼───────────────┐
 │ apps/mac  (Electron 33)      │  ← this package
 │  ┌─────────────────────────┐ │
@@ -121,6 +185,9 @@ The next launch will pick up new pairing credentials again.
 │  │ ipc-handlers.ts         │ │  ipcMain.handle('aleja:*')
 │  └─────────────────────────┘ │
 │  ┌─────────────────────────┐ │
+│  │ standalone-server.ts    │ │  spawn Next.js standalone
+│  └────────┬────────────────┘ │  (prod only)
+│  ┌────────▼────────────────┐ │
 │  │ sidecar-manager.ts      │ │  lazy spawn, SIGTERM/SIGKILL
 │  └────────┬────────────────┘ │
 └───────────┼──────────────────┘
@@ -132,11 +199,19 @@ The next launch will pick up new pairing credentials again.
    └──────────────────────┘   services/nas-backend)
 ```
 
+In production the renderer is the **Next.js standalone server**
+that ships inside the `.app` at
+`Contents/Resources/standalone/`. The main process spawns it
+as a child process (see `src/standalone-server.ts`), waits for
+the HTTP listener, and `loadURL`s its `http://127.0.0.1:<port>`
+URL. The dev path (`loadURL('http://localhost:3001')`) is
+unchanged.
+
 ## Scripts
 
 | Command            | What it does                                                |
 |--------------------|-------------------------------------------------------------|
-| `npm test`         | Run the vitest unit + integration suite (64 tests across 12 files). |
+| `npm test`         | Run the vitest unit + integration suite (86 tests across 16 files). |
 | `npm run typecheck`| `tsc --noEmit` against the full tsconfig.                   |
 | `npm run build`    | Compile `src/*.ts` into `dist/*.js` (electron-forge input). |
 | `npm run dev`      | Boot Electron in dev mode (loads `http://localhost:3001`).  |
