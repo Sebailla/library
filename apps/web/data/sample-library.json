@@ -1,0 +1,115 @@
+[
+  {
+    "id": "lib-garciamarquez-cienanos-001",
+    "title": "Cien años de soledad",
+    "author": "Gabriel García Márquez",
+    "year": 1967,
+    "format": "epub",
+    "lang": "es",
+    "coverUrl": "https://covers.openlibrary.org/b/isbn/9780307474728-M.jpg",
+    "progress": 0.0
+  },
+  {
+    "id": "lib-borges-ficciones-002",
+    "title": "Ficciones",
+    "author": "Jorge Luis Borges",
+    "year": 1999,
+    "format": "epub",
+    "lang": "es",
+    "coverUrl": "https://covers.openlibrary.org/b/isbn/9780802130303-M.jpg",
+    "progress": 0.42
+  },
+  {
+    "id": "lib-cortazar-rayuela-003",
+    "title": "Rayuela",
+    "author": "Julio Cortázar",
+    "year": 1963,
+    "format": "pdf",
+    "lang": "es",
+    "coverUrl": "https://covers.openlibrary.org/b/isbn/9780394752846-M.jpg",
+    "progress": 0.0
+  },
+  {
+    "id": "lib-vargasllosa-ciudadyperros-004",
+    "title": "La ciudad y los perros",
+    "author": "Mario Vargas Llosa",
+    "year": 1963,
+    "format": "pdf",
+    "lang": "es",
+    "coverUrl": "https://covers.openlibrary.org/b/isbn/9788420471058-M.jpg",
+    "progress": 0.78
+  },
+  {
+    "id": "lib-garciamarquez-amorcolera-005",
+    "title": "El amor en los tiempos del cólera",
+    "author": "Gabriel García Márquez",
+    "year": 1985,
+    "format": "epub",
+    "lang": "es",
+    "coverUrl": "https://covers.openlibrary.org/b/isbn/9780307389732-M.jpg",
+    "progress": 0.0
+  },
+  {
+    "id": "lib-rulfo-pedroparamo-006",
+    "title": "Pedro Páramo",
+    "author": "Juan Rulfo",
+    "year": 1955,
+    "format": "pdf",
+    "lang": "es",
+    "coverUrl": "https://covers.openlibrary.org/b/isbn/9780802133908-M.jpg"
+  },
+  {
+    "id": "lib-garciamarquez-100solitude-007",
+    "title": "One Hundred Years of Solitude",
+    "author": "Gabriel García Márquez",
+    "year": 1970,
+    "format": "pdf",
+    "lang": "en",
+    "coverUrl": "https://covers.openlibrary.org/b/isbn/9780060883287-M.jpg"
+  },
+  {
+    "id": "lib-hemingway-oldmansea-008",
+    "title": "The Old Man and the Sea",
+    "author": "Ernest Hemingway",
+    "year": 1952,
+    "format": "epub",
+    "lang": "en",
+    "coverUrl": "https://covers.openlibrary.org/b/isbn/9780684801223-M.jpg"
+  },
+  {
+    "id": "lib-orwell-1984-009",
+    "title": "1984",
+    "author": "George Orwell",
+    "year": 1977,
+    "format": "pdf",
+    "lang": "en",
+    "coverUrl": "https://covers.openlibrary.org/b/isbn/9780451524935-M.jpg"
+  },
+  {
+    "id": "lib-asimov-foundation-010",
+    "title": "Foundation",
+    "author": "Isaac Asimov",
+    "year": 1951,
+    "format": "epub",
+    "lang": "en",
+    "coverUrl": "https://covers.openlibrary.org/b/isbn/9780553293357-M.jpg"
+  },
+  {
+    "id": "lib-herbert-dune-011",
+    "title": "Dune",
+    "author": "Frank Herbert",
+    "year": 1965,
+    "format": "pdf",
+    "lang": "en",
+    "coverUrl": "https://covers.openlibrary.org/b/isbn/9780441172719-M.jpg"
+  },
+  {
+    "id": "lib-harari-sapiens-012",
+    "title": "Sapiens",
+    "author": "Yuval Noah Harari",
+    "year": 2014,
+    "format": "epub",
+    "lang": "en",
+    "coverUrl": "https://covers.openlibrary.org/b/isbn/9780062316097-M.jpg"
+  }
+]
