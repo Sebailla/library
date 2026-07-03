@@ -1,0 +1,202 @@
+[
+  {
+    "id": "nas-pragmatic-programmer-001",
+    "title": "The Pragmatic Programmer",
+    "author": "Andrew Hunt & David Thomas",
+    "year": 1999,
+    "format": "epub",
+    "lang": "en",
+    "category": "tech",
+    "coverUrl": "https://covers.openlibrary.org/b/isbn/9780201616224-M.jpg"
+  },
+  {
+    "id": "nas-clean-code-002",
+    "title": "Clean Code",
+    "author": "Robert C. Martin",
+    "year": 2008,
+    "format": "pdf",
+    "lang": "en",
+    "category": "tech",
+    "coverUrl": "https://covers.openlibrary.org/b/isbn/9780132350884-M.jpg"
+  },
+  {
+    "id": "nas-design-patterns-003",
+    "title": "Design Patterns",
+    "author": "Erich Gamma et al.",
+    "year": 1994,
+    "format": "pdf",
+    "lang": "en",
+    "category": "tech",
+    "coverUrl": "https://covers.openlibrary.org/b/isbn/9780201633610-M.jpg"
+  },
+  {
+    "id": "nas-code-complete-004",
+    "title": "Code Complete",
+    "author": "Steve McConnell",
+    "year": 2004,
+    "format": "epub",
+    "lang": "en",
+    "category": "tech",
+    "coverUrl": "https://covers.openlibrary.org/b/isbn/9780735619678-M.jpg"
+  },
+  {
+    "id": "nas-mythical-manmonth-005",
+    "title": "The Mythical Man-Month",
+    "author": "Fred Brooks",
+    "year": 1975,
+    "format": "epub",
+    "lang": "en",
+    "category": "tech",
+    "coverUrl": "https://covers.openlibrary.org/b/isbn/9780201836323-M.jpg"
+  },
+  {
+    "id": "nas-brief-history-time-006",
+    "title": "A Brief History of Time",
+    "author": "Stephen Hawking",
+    "year": 1988,
+    "format": "pdf",
+    "lang": "en",
+    "category": "science",
+    "coverUrl": "https://covers.openlibrary.org/b/isbn/9780553380163-M.jpg"
+  },
+  {
+    "id": "nas-cosmos-007",
+    "title": "Cosmos",
+    "author": "Carl Sagan",
+    "year": 1980,
+    "format": "epub",
+    "lang": "en",
+    "category": "science",
+    "coverUrl": "https://covers.openlibrary.org/b/isbn/9780345539434-M.jpg"
+  },
+  {
+    "id": "nas-selfish-gene-008",
+    "title": "The Selfish Gene",
+    "author": "Richard Dawkins",
+    "year": 1976,
+    "format": "pdf",
+    "lang": "en",
+    "category": "science",
+    "coverUrl": "https://covers.openlibrary.org/b/isbn/9780198788607-M.jpg"
+  },
+  {
+    "id": "nas-short-history-nearly-everything-009",
+    "title": "A Short History of Nearly Everything",
+    "author": "Bill Bryson",
+    "year": 2003,
+    "format": "epub",
+    "lang": "en",
+    "category": "science",
+    "coverUrl": "https://covers.openlibrary.org/b/isbn/9780767908184-M.jpg"
+  },
+  {
+    "id": "nas-guns-germs-steel-010",
+    "title": "Guns, Germs, and Steel",
+    "author": "Jared Diamond",
+    "year": 1997,
+    "format": "pdf",
+    "lang": "en",
+    "category": "history",
+    "coverUrl": "https://covers.openlibrary.org/b/isbn/9780393354324-M.jpg"
+  },
+  {
+    "id": "nas-sombra-viento-011",
+    "title": "La sombra del viento",
+    "author": "Carlos Ruiz Zafón",
+    "year": 2001,
+    "format": "epub",
+    "lang": "es",
+    "category": "fiction",
+    "coverUrl": "https://covers.openlibrary.org/b/isbn/9780143126393-M.jpg"
+  },
+  {
+    "id": "nas-codigo-davinci-012",
+    "title": "El código Da Vinci",
+    "author": "Dan Brown",
+    "year": 2003,
+    "format": "pdf",
+    "lang": "en",
+    "category": "fiction",
+    "coverUrl": "https://covers.openlibrary.org/b/isbn/9780307474278-M.jpg"
+  },
+  {
+    "id": "nas-crimen-castigo-013",
+    "title": "Crimen y castigo",
+    "author": "Fiódor Dostoyevski",
+    "year": 2014,
+    "format": "epub",
+    "lang": "es",
+    "category": "fiction",
+    "coverUrl": "https://covers.openlibrary.org/b/isbn/9788491050485-M.jpg"
+  },
+  {
+    "id": "nas-metamorfosis-014",
+    "title": "La metamorfosis",
+    "author": "Franz Kafka",
+    "year": 2014,
+    "format": "epub",
+    "lang": "es",
+    "category": "fiction",
+    "coverUrl": "https://covers.openlibrary.org/b/isbn/9788491050454-M.jpg"
+  },
+  {
+    "id": "nas-siddhartha-015",
+    "title": "Siddhartha",
+    "author": "Hermann Hesse",
+    "year": 2008,
+    "format": "epub",
+    "lang": "en",
+    "category": "fiction",
+    "coverUrl": "https://covers.openlibrary.org/b/isbn/9780553208849-M.jpg"
+  },
+  {
+    "id": "nas-origin-species-016",
+    "title": "On the Origin of Species",
+    "author": "Charles Darwin",
+    "year": 2008,
+    "format": "pdf",
+    "lang": "en",
+    "category": "science",
+    "coverUrl": "https://covers.openlibrary.org/b/isbn/9780451529060-M.jpg"
+  },
+  {
+    "id": "nas-peoples-history-017",
+    "title": "A People's History of the United States",
+    "author": "Howard Zinn",
+    "year": 1980,
+    "format": "pdf",
+    "lang": "en",
+    "category": "history",
+    "coverUrl": "https://covers.openlibrary.org/b/isbn/9780062397348-M.jpg"
+  },
+  {
+    "id": "nas-structure-scientific-revolutions-018",
+    "title": "The Structure of Scientific Revolutions",
+    "author": "Thomas Kuhn",
+    "year": 1962,
+    "format": "epub",
+    "lang": "en",
+    "category": "science",
+    "coverUrl": "https://covers.openlibrary.org/b/isbn/9780226458120-M.jpg"
+  },
+  {
+    "id": "nas-godel-escher-bach-019",
+    "title": "Gödel, Escher, Bach",
+    "author": "Douglas Hofstadter",
+    "year": 1979,
+    "format": "pdf",
+    "lang": "en",
+    "category": "non-fiction",
+    "coverUrl": "https://covers.openlibrary.org/b/isbn/9780465026562-M.jpg"
+  },
+  {
+    "id": "nas-thinking-fast-slow-020",
+    "title": "Thinking, Fast and Slow",
+    "author": "Daniel Kahneman",
+    "year": 2011,
+    "format": "epub",
+    "lang": "en",
+    "category": "non-fiction",
+    "coverUrl": "https://covers.openlibrary.org/b/isbn/9780374533557-M.jpg"
+  }
+]
